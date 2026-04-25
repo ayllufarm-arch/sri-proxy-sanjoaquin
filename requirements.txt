@@ -3,6 +3,6 @@ flask-cors==4.0.1
 requests==2.31.0
 gunicorn==22.0.0
 # Firma digital XML para SRI Ecuador
-lxml==5.2.2
+lxml==4.9.3
 signxml==2.10.0
 cryptography==42.0.8
