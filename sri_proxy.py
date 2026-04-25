@@ -52,9 +52,9 @@ try:
     from cryptography.hazmat.backends import default_backend
     from signxml import XMLSigner, methods
     FIRMA_DISPONIBLE = True
-except ImportError:
+except Exception as e:
     FIRMA_DISPONIBLE = False
-    logging.warning("Módulos de firma no disponibles. Instala: pip install lxml signxml cryptography")
+    logging.warning(f"Módulos de firma no disponibles: {e}. Instala: pip install lxml signxml cryptography")
 
 # ─── CONFIGURACIÓN ────────────────────────────────────────────────────────────
 
