@@ -528,7 +528,7 @@ def payphone_link():
     if not token:
         return jsonify({"error": "Token de PayPhone requerido"}), 400
     try:
-        logger.info(f"PayPhone /api/Links request: {data}")
+        logger.info(f"PayPhone /api/Links token prefix: {token[:12]}... storeId: {data.get('storeId')} amount: {data.get('amount')}")
         resp = requests.post(
             "https://pay.payphonetodoesposible.com/api/Links",
             json=data,
