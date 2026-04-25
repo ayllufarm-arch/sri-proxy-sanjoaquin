@@ -515,12 +515,13 @@ def autorizacion():
 
 # ─── PAYPHONE PROXY ──────────────────────────────────────────────────────────
 
-@app.route("/payphone/sale", methods=["POST", "OPTIONS"])
-def payphone_sale():
+@app.route("/payphone/link", methods=["POST", "OPTIONS"])
+def payphone_link():
     """
-    Proxy para crear un cobro vía PayPhone app (API Sale).
-    Body JSON: { token, phoneNumber, amount, amountWithoutTax, amountWithTax,
-                 tax, currency, reference, clientTransactionId }
+    Proxy para generar un link de pago vía PayPhone (API Links).
+    Body JSON: { token, amount, amountWithoutTax, amountWithTax, tax,
+                 currency, storeId, reference, clientTransactionId }
+    Respuesta: URL string (ej. https://payp.page.link/aYu55)
     """
     data  = request.get_json(force=True, silent=True) or {}
     token = data.pop("token", "")
@@ -528,16 +529,17 @@ def payphone_sale():
         return jsonify({"error": "Token de PayPhone requerido"}), 400
     try:
         resp = requests.post(
-            "https://pay.payphonetodoesposible.com/api/sale",
+            "https://pay.payphonetodoesposible.com/api/Links",
             json=data,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=15
         )
-        return (resp.text, resp.status_code, {"Content-Type": "application/json"})
+        # PayPhone devuelve la URL como texto plano
+        return (resp.text, resp.status_code, {"Content-Type": "text/plain"})
     except requests.exceptions.Timeout:
         return jsonify({"error": "PayPhone no respondió a tiempo"}), 504
     except Exception as e:
-        logger.exception("Error en /payphone/sale")
+        logger.exception("Error en /payphone/link")
         return jsonify({"error": str(e)}), 500
 
 
