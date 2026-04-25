@@ -515,22 +515,20 @@ def autorizacion():
 
 # ─── PAYPHONE PROXY ──────────────────────────────────────────────────────────
 
-@app.route("/payphone/cobrar", methods=["POST", "OPTIONS"])
-def payphone_cobrar():
+@app.route("/payphone/sale", methods=["POST", "OPTIONS"])
+def payphone_sale():
     """
-    Proxy para crear un pago en PayPhone evitando CORS.
-    Body JSON: { token, amount, amountWithoutTax, amountWithTax, tax,
-                 currency, reference, clientTransactionId,
-                 responseUrl, cancellationUrl }
+    Proxy para crear un cobro vía PayPhone app (API Sale).
+    Body JSON: { token, phoneNumber, amount, amountWithoutTax, amountWithTax,
+                 tax, currency, reference, clientTransactionId }
     """
     data  = request.get_json(force=True, silent=True) or {}
     token = data.pop("token", "")
     if not token:
         return jsonify({"error": "Token de PayPhone requerido"}), 400
-
     try:
         resp = requests.post(
-            "https://pay.payphonetodoesposible.com/api/button/Cobrar",
+            "https://pay.payphonetodoesposible.com/api/sale",
             json=data,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=15
@@ -539,31 +537,30 @@ def payphone_cobrar():
     except requests.exceptions.Timeout:
         return jsonify({"error": "PayPhone no respondió a tiempo"}), 504
     except Exception as e:
-        logger.exception("Error en /payphone/cobrar")
+        logger.exception("Error en /payphone/sale")
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/payphone/confirmar", methods=["POST", "OPTIONS"])
-def payphone_confirmar():
+@app.route("/payphone/status", methods=["POST", "OPTIONS"])
+def payphone_status():
     """
-    Proxy para confirmar/verificar un pago de PayPhone.
-    Body JSON: { token, id, clientTransactionId }
+    Proxy para consultar el estado de un pago.
+    Body JSON: { token, transactionId }
     """
     data  = request.get_json(force=True, silent=True) or {}
     token = data.pop("token", "")
-    if not token:
-        return jsonify({"error": "Token de PayPhone requerido"}), 400
-
+    tid   = data.get("transactionId", "")
+    if not token or not tid:
+        return jsonify({"error": "token y transactionId requeridos"}), 400
     try:
-        resp = requests.post(
-            "https://pay.payphonetodoesposible.com/api/button/V2/Confirm",
-            json=data,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        resp = requests.get(
+            f"https://pay.payphonetodoesposible.com/api/sale?transactionId={tid}",
+            headers={"Authorization": f"Bearer {token}"},
             timeout=15
         )
         return (resp.text, resp.status_code, {"Content-Type": "application/json"})
     except Exception as e:
-        logger.exception("Error en /payphone/confirmar")
+        logger.exception("Error en /payphone/status")
         return jsonify({"error": str(e)}), 500
 
 
