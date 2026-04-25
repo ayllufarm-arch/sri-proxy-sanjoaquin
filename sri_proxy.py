@@ -528,12 +528,14 @@ def payphone_link():
     if not token:
         return jsonify({"error": "Token de PayPhone requerido"}), 400
     try:
+        logger.info(f"PayPhone /api/Links request: {data}")
         resp = requests.post(
             "https://pay.payphonetodoesposible.com/api/Links",
             json=data,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=15
         )
+        logger.info(f"PayPhone /api/Links response {resp.status_code}: {resp.text[:300]}")
         # PayPhone devuelve la URL como texto plano
         return (resp.text, resp.status_code, {"Content-Type": "text/plain"})
     except requests.exceptions.Timeout:
