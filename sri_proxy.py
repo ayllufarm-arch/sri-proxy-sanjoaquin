@@ -513,6 +513,60 @@ def autorizacion():
         return jsonify({"error": "Error interno del servidor"}), 500
 
 
+# ─── PAYPHONE PROXY ──────────────────────────────────────────────────────────
+
+@app.route("/payphone/cobrar", methods=["POST", "OPTIONS"])
+def payphone_cobrar():
+    """
+    Proxy para crear un pago en PayPhone evitando CORS.
+    Body JSON: { token, amount, amountWithoutTax, amountWithTax, tax,
+                 currency, reference, clientTransactionId,
+                 responseUrl, cancellationUrl }
+    """
+    data  = request.get_json(force=True, silent=True) or {}
+    token = data.pop("token", "")
+    if not token:
+        return jsonify({"error": "Token de PayPhone requerido"}), 400
+
+    try:
+        resp = requests.post(
+            "https://pay.payphonetodoesposible.com/api/button/Cobrar",
+            json=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=15
+        )
+        return (resp.text, resp.status_code, {"Content-Type": "application/json"})
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "PayPhone no respondió a tiempo"}), 504
+    except Exception as e:
+        logger.exception("Error en /payphone/cobrar")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/payphone/confirmar", methods=["POST", "OPTIONS"])
+def payphone_confirmar():
+    """
+    Proxy para confirmar/verificar un pago de PayPhone.
+    Body JSON: { token, id, clientTransactionId }
+    """
+    data  = request.get_json(force=True, silent=True) or {}
+    token = data.pop("token", "")
+    if not token:
+        return jsonify({"error": "Token de PayPhone requerido"}), 400
+
+    try:
+        resp = requests.post(
+            "https://pay.payphonetodoesposible.com/api/button/V2/Confirm",
+            json=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=15
+        )
+        return (resp.text, resp.status_code, {"Content-Type": "application/json"})
+    except Exception as e:
+        logger.exception("Error en /payphone/confirmar")
+        return jsonify({"error": str(e)}), 500
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
