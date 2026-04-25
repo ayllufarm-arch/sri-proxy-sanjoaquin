@@ -67,26 +67,25 @@ GMAIL_USER     = os.environ.get("GMAIL_USER", "")
 GMAIL_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL", "ayllu.farm@gmail.com")
 
-# Certificado digital opcional en variables de entorno (más seguro que enviarlo desde el browser)
-# Si están configuradas, /firmar las usa y NO requiere p12Base64/p12Password en el body.
 P12_B64  = os.environ.get("P12_B64",  "").strip()
 P12_PASS = os.environ.get("P12_PASS", "").strip()
 
-# Almacén de códigos de verificación en memoria: { email: { code, expires } }
 _verification_codes: dict = {}
 
-# CORS restringido al dominio configurado
-# En desarrollo acepta localhost con cualquier puerto
 def get_allowed_origins():
-    base = [ALLOWED_ORIGIN]
-    if "localhost" in ALLOWED_ORIGIN or "127.0.0.1" in ALLOWED_ORIGIN:
-        base += [
-            "http://localhost",
-            "http://127.0.0.1",
-            re.compile(r"http://localhost:\d+"),
-            re.compile(r"http://127\.0\.0\.1:\d+"),
-        ]
-    return base
+    # Soporta múltiples orígenes separados por coma en ALLOWED_ORIGIN
+    raw = os.environ.get("ALLOWED_ORIGIN", "http://localhost")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    extra = []
+    for o in origins:
+        if "localhost" in o or "127.0.0.1" in o:
+            extra += [
+                "http://localhost",
+                "http://127.0.0.1",
+                re.compile(r"http://localhost:\d+"),
+                re.compile(r"http://127\.0\.0\.1:\d+"),
+            ]
+    return origins + extra
 
 CORS(app, origins=get_allowed_origins(), methods=["GET", "POST", "OPTIONS"],
      allow_headers=["Content-Type"])
