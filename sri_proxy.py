@@ -38,7 +38,7 @@ import secrets
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 import requests
 from functools import wraps
 from collections import defaultdict
@@ -60,7 +60,7 @@ except Exception as e:
 
 app = Flask(__name__)
 
-ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost")
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost").strip()
 LOG_LEVEL      = os.environ.get("LOG_LEVEL", "INFO").upper()
 PORT           = int(os.environ.get("PORT", 5000))
 GMAIL_USER     = os.environ.get("GMAIL_USER", "")
@@ -515,6 +515,7 @@ def autorizacion():
 # ─── PAYPHONE PROXY ──────────────────────────────────────────────────────────
 
 @app.route("/payphone/link", methods=["POST", "OPTIONS"])
+@cross_origin()
 def payphone_link():
     """
     Proxy para generar un link de pago vía PayPhone (API Links).
