@@ -560,7 +560,7 @@ def payphone_confirm():
         return jsonify({"error": "token y clientTransactionId requeridos"}), 400
     try:
         resp = requests.get(
-            f"https://pay.payphonetodoesposible.com/api/sale?clientTransactionId={ctxid}",
+            f"https://pay.payphonetodoesposible.com/api/sale/client/{ctxid}",
             headers={"Authorization": f"Bearer {token}"},
             timeout=15
         )
