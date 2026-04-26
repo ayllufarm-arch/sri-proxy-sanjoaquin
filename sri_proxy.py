@@ -37,7 +37,7 @@ import smtplib
 import secrets
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS, cross_origin
 import requests
 from functools import wraps
@@ -61,6 +61,7 @@ except Exception as e:
 app = Flask(__name__)
 
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost").strip()
+STORE_URL      = os.environ.get("STORE_URL", "https://san-joaquin-artesania-carnica.web.app").strip()
 LOG_LEVEL      = os.environ.get("LOG_LEVEL", "INFO").upper()
 PORT           = int(os.environ.get("PORT", 5000))
 GMAIL_USER     = os.environ.get("GMAIL_USER", "")
@@ -590,7 +591,14 @@ def payphone_webhook():
     logger.info(f"[Webhook] Body: {raw_body[:800]}")
 
     if request.method in ('GET', 'OPTIONS'):
-        return jsonify({"status": "OK", "service": "PayPhone webhook receiver active"}), 200
+        # PayPhone redirige el NAVEGADOR del cliente aquí después del pago.
+        # Reenviamos al store con los mismos parámetros para que el store confirme el pago.
+        tx_id      = request.args.get('clientTransactionId', '')
+        pp_id      = request.args.get('id', '')
+        payment_id = request.args.get('paymentId', '')
+        logger.info(f"[Webhook GET] Redirect de PayPhone: txId={tx_id} id={pp_id}")
+        store_redirect = f"{STORE_URL}?id={pp_id}&clientTransactionId={tx_id}&paymentId={payment_id}"
+        return redirect(store_redirect, code=302)
 
     data = request.get_json(force=True, silent=True) or {}
     if not data:
