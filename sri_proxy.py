@@ -624,6 +624,21 @@ def payphone_webhook():
     return jsonify({"estado": "OK"}), 200
 
 
+@app.route("/payphone/debug", methods=["GET"])
+@cross_origin()
+def payphone_debug():
+    """Muestra pagos recibidos vía webhook (solo para diagnóstico)."""
+    resultado = {}
+    for k, v in _confirmed_payments.items():
+        resultado[k] = {
+            "confirmed": v.get("confirmed"),
+            "statusCode": v.get("statusCode"),
+            "transactionStatus": v.get("transactionStatus"),
+            "ageSeconds": int(time.time() - v.get("timestamp", 0)),
+        }
+    return jsonify({"webhooks_recibidos": len(resultado), "pagos": resultado}), 200
+
+
 @app.route("/payphone/confirmed/<path:tx_id>", methods=["GET", "OPTIONS"])
 @cross_origin()
 def payphone_confirmed(tx_id):
