@@ -71,6 +71,7 @@ P12_B64  = os.environ.get("P12_B64",  "").strip()
 P12_PASS = os.environ.get("P12_PASS", "").strip()
 
 _verification_codes: dict = {}
+_confirmed_payments: dict = {}   # clientTransactionId -> {confirmed, timestamp, statusCode, raw}
 
 def get_allowed_origins():
     # Soporta múltiples orígenes separados por coma en ALLOWED_ORIGIN
@@ -528,7 +529,11 @@ def payphone_link():
     if not token:
         return jsonify({"error": "Token de PayPhone requerido"}), 400
     try:
-        logger.info(f"PayPhone /api/Links token prefix: {token[:12]}... storeId: {data.get('storeId')} amount: {data.get('amount')}")
+        # Inyectar URL del webhook automáticamente para recibir notificación server-side
+        webhook_url = request.url_root.rstrip('/') + '/payphone/webhook'
+        data.setdefault('notifyUrl', webhook_url)
+        data.setdefault('confirmPaymentUrl', webhook_url)
+        logger.info(f"PayPhone /api/Links token prefix: {token[:12]}... storeId: {data.get('storeId')} amount: {data.get('amount')} notifyUrl: {webhook_url}")
         resp = requests.post(
             "https://pay.payphonetodoesposible.com/api/Links",
             json=data,
@@ -569,6 +574,82 @@ def payphone_confirm():
     except Exception as e:
         logger.exception("Error en /payphone/confirm")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/payphone/webhook", methods=["POST", "GET", "OPTIONS"])
+@cross_origin()
+def payphone_webhook():
+    """
+    Recibe la Notificación Externa de PayPhone cuando un pago es aprobado.
+    PayPhone hace POST a esta URL automáticamente (server-to-server).
+    Configura esta URL en el portal PayPhone → Configuración → Notificaciones externas.
+    También se inyecta como notifyUrl/confirmPaymentUrl en cada link de pago.
+    """
+    raw_body = request.data.decode('utf-8', errors='replace')
+    logger.info(f"[Webhook] Recibido: method={request.method} content-type={request.content_type}")
+    logger.info(f"[Webhook] Body: {raw_body[:800]}")
+
+    if request.method in ('GET', 'OPTIONS'):
+        return jsonify({"status": "OK", "service": "PayPhone webhook receiver active"}), 200
+
+    data = request.get_json(force=True, silent=True) or {}
+    if not data:
+        data = request.form.to_dict()
+
+    tx_id = str(data.get("clientTransactionId",
+                data.get("ClientTransactionId",
+                data.get("client_transaction_id", "")))).strip()
+    status_code   = data.get("statusCode", data.get("StatusCode", data.get("status_code")))
+    tx_status     = str(data.get("transactionStatus", data.get("TransactionStatus", ""))).strip()
+    numeric_tid   = data.get("id", data.get("transactionId", ""))
+
+    aprobado = (status_code == 3 or str(status_code) == "3" or
+                tx_status.lower() in ("approved", "aprobado"))
+
+    logger.info(f"[Webhook] txId={tx_id} numericId={numeric_tid} statusCode={status_code} status={tx_status} aprobado={aprobado}")
+
+    if tx_id:
+        _confirmed_payments[tx_id] = {
+            "confirmed":         aprobado,
+            "timestamp":         time.time(),
+            "statusCode":        status_code,
+            "transactionStatus": tx_status,
+            "transactionId":     numeric_tid,
+            "raw":               data,
+        }
+        logger.info(f"[Webhook] Guardado en memoria: txId={tx_id} confirmed={aprobado}")
+    else:
+        logger.warning(f"[Webhook] Sin clientTransactionId — body: {raw_body[:300]}")
+
+    return jsonify({"estado": "OK"}), 200
+
+
+@app.route("/payphone/confirmed/<path:tx_id>", methods=["GET", "OPTIONS"])
+@cross_origin()
+def payphone_confirmed(tx_id):
+    """
+    Consulta si un pago fue confirmado vía webhook de PayPhone.
+    El frontend hace polling a este endpoint cada pocos segundos.
+    """
+    tx_id = tx_id.strip()
+    entry = _confirmed_payments.get(tx_id)
+
+    if not entry:
+        return jsonify({"confirmed": False, "found": False}), 200
+
+    age = time.time() - entry.get("timestamp", 0)
+    if age > 7200:   # expira a las 2 horas
+        del _confirmed_payments[tx_id]
+        return jsonify({"confirmed": False, "expired": True}), 200
+
+    return jsonify({
+        "confirmed":         entry.get("confirmed", False),
+        "found":             True,
+        "statusCode":        entry.get("statusCode"),
+        "transactionStatus": entry.get("transactionStatus"),
+        "transactionId":     entry.get("transactionId"),
+        "ageSeconds":        int(age),
+    }), 200
 
 
 @app.route("/payphone/status", methods=["POST", "OPTIONS"])
