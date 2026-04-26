@@ -73,6 +73,7 @@ P12_PASS = os.environ.get("P12_PASS", "").strip()
 
 _verification_codes: dict = {}
 _confirmed_payments: dict = {}   # clientTransactionId -> {confirmed, timestamp, statusCode, raw}
+_token_store: dict       = {}   # clientTransactionId -> {token, timestamp}  para auto-confirmar
 
 def get_allowed_origins():
     # Soporta múltiples orígenes separados por coma en ALLOWED_ORIGIN
@@ -530,11 +531,16 @@ def payphone_link():
     if not token:
         return jsonify({"error": "Token de PayPhone requerido"}), 400
     try:
-        # Inyectar URL del webhook automáticamente para recibir notificación server-side
+        # Guardar token por txId para poder auto-confirmar cuando PayPhone redirige
+        tx_id = data.get('clientTransactionId', '')
+        if tx_id:
+            _token_store[tx_id] = {"token": token, "timestamp": time.time()}
+            logger.info(f"Token guardado para txId={tx_id}")
+
         webhook_url = request.url_root.rstrip('/') + '/payphone/webhook'
         data.setdefault('notifyUrl', webhook_url)
         data.setdefault('confirmPaymentUrl', webhook_url)
-        logger.info(f"PayPhone /api/Links token prefix: {token[:12]}... storeId: {data.get('storeId')} amount: {data.get('amount')} notifyUrl: {webhook_url}")
+        logger.info(f"PayPhone /api/Links token prefix: {token[:12]}... storeId: {data.get('storeId')} amount: {data.get('amount')}")
         resp = requests.post(
             "https://pay.payphonetodoesposible.com/api/Links",
             json=data,
@@ -542,7 +548,6 @@ def payphone_link():
             timeout=15
         )
         logger.info(f"PayPhone /api/Links response {resp.status_code}: {resp.text[:300]}")
-        # PayPhone devuelve la URL como texto plano
         return (resp.text, resp.status_code, {"Content-Type": "text/plain"})
     except requests.exceptions.Timeout:
         return jsonify({"error": "PayPhone no respondió a tiempo"}), 504
@@ -592,11 +597,50 @@ def payphone_webhook():
 
     if request.method in ('GET', 'OPTIONS'):
         # PayPhone redirige el NAVEGADOR del cliente aquí después del pago.
-        # Reenviamos al store con los mismos parámetros para que el store confirme el pago.
         tx_id      = request.args.get('clientTransactionId', '')
         pp_id      = request.args.get('id', '')
         payment_id = request.args.get('paymentId', '')
         logger.info(f"[Webhook GET] Redirect de PayPhone: txId={tx_id} id={pp_id}")
+
+        # AUTO-CONFIRMAR con /api/button/Confirm usando el token guardado al crear el link.
+        # Debe llamarse dentro de los 5 minutos post-pago o PayPhone revierte la transacción.
+        stored = _token_store.get(tx_id, {})
+        token  = stored.get("token", "")
+        if token and pp_id:
+            try:
+                conf_resp = requests.post(
+                    "https://pay.payphonetodoesposible.com/api/button/Confirm",
+                    json={"id": int(pp_id), "clientTransactionId": tx_id},
+                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                    timeout=10
+                )
+                raw_conf = conf_resp.text
+                logger.info(f"[Auto-Confirm] {pp_id}/{tx_id}: HTTP {conf_resp.status_code} → {raw_conf[:300]}")
+                try:
+                    conf_data = conf_resp.json()
+                    if isinstance(conf_data, list):
+                        conf_data = conf_data[0] if conf_data else {}
+                    aprobado = (conf_data.get("statusCode") == 3 or
+                                str(conf_data.get("statusCode")) == "3" or
+                                conf_data.get("transactionStatus") == "Approved")
+                except Exception:
+                    aprobado = False
+                    conf_data = {}
+                _confirmed_payments[tx_id] = {
+                    "confirmed":         aprobado,
+                    "timestamp":         time.time(),
+                    "statusCode":        conf_data.get("statusCode"),
+                    "transactionStatus": conf_data.get("transactionStatus"),
+                    "transactionId":     pp_id,
+                    "source":            "auto-confirm",
+                }
+                logger.info(f"[Auto-Confirm] txId={tx_id} aprobado={aprobado}")
+            except Exception as e:
+                logger.exception(f"[Auto-Confirm] Error: {e}")
+        else:
+            logger.warning(f"[Auto-Confirm] Sin token para txId={tx_id} — no se puede confirmar")
+
+        # Redirigir al store con los params para que también procese en el navegador
         store_redirect = f"{STORE_URL}?id={pp_id}&clientTransactionId={tx_id}&paymentId={payment_id}"
         return redirect(store_redirect, code=302)
 
