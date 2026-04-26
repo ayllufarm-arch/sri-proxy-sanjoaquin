@@ -719,6 +719,33 @@ def payphone_confirmed(tx_id):
     }), 200
 
 
+@app.route("/payphone/button-confirm", methods=["POST", "OPTIONS"])
+@cross_origin()
+def payphone_button_confirm():
+    """
+    Confirma una transacción via /api/button/Confirm.
+    OBLIGATORIO dentro de 5 min post-pago o PayPhone revierte.
+    Body: { token, id (numeric), clientTransactionId }
+    """
+    data  = request.get_json(force=True, silent=True) or {}
+    token = data.pop("token", "")
+    if not token:
+        return jsonify({"error": "Token requerido"}), 400
+    try:
+        logger.info(f"PayPhone button/Confirm payload: {data}")
+        resp = requests.post(
+            "https://pay.payphonetodoesposible.com/api/button/Confirm",
+            json=data,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=15
+        )
+        logger.info(f"PayPhone button/Confirm: HTTP {resp.status_code} → {resp.text[:400]}")
+        return (resp.text, resp.status_code, {"Content-Type": "application/json"})
+    except Exception as e:
+        logger.exception("Error en /payphone/button-confirm")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/payphone/status", methods=["POST", "OPTIONS"])
 def payphone_status():
     """
