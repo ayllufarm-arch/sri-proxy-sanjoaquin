@@ -545,6 +545,32 @@ def payphone_link():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/payphone/confirm", methods=["POST", "OPTIONS"])
+@cross_origin()
+def payphone_confirm():
+    """
+    Consulta el estado de un pago por clientTransactionId.
+    Body JSON: { token, clientTransactionId }
+    Respuesta: JSON de PayPhone con transactionStatus (3=aprobado, 2=anulado, 1=pendiente)
+    """
+    data  = request.get_json(force=True, silent=True) or {}
+    token = data.pop("token", "")
+    ctxid = data.get("clientTransactionId", "")
+    if not token or not ctxid:
+        return jsonify({"error": "token y clientTransactionId requeridos"}), 400
+    try:
+        resp = requests.get(
+            f"https://pay.payphonetodoesposible.com/api/sale?clientTransactionId={ctxid}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15
+        )
+        logger.info(f"PayPhone confirm {ctxid}: {resp.status_code} {resp.text[:200]}")
+        return (resp.text, resp.status_code, {"Content-Type": "application/json"})
+    except Exception as e:
+        logger.exception("Error en /payphone/confirm")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/payphone/status", methods=["POST", "OPTIONS"])
 def payphone_status():
     """
