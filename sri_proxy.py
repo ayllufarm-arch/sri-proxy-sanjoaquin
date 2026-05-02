@@ -37,6 +37,8 @@ import smtplib
 import secrets
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
 from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS, cross_origin
 import requests
@@ -68,8 +70,9 @@ GMAIL_USER     = os.environ.get("GMAIL_USER", "")
 GMAIL_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL", "ayllu.farm@gmail.com")
 
-P12_B64  = os.environ.get("P12_B64",  "").strip()
-P12_PASS = os.environ.get("P12_PASS", "").strip()
+P12_B64         = os.environ.get("P12_B64",         "").strip()
+P12_PASS        = os.environ.get("P12_PASS",        "").strip()
+PAYPHONE_TOKEN  = os.environ.get("PAYPHONE_TOKEN",  "").strip()
 
 _verification_codes: dict = {}
 _confirmed_payments: dict = {}   # clientTransactionId -> {confirmed, timestamp, statusCode, raw}
@@ -345,13 +348,14 @@ def verificar_codigo():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
-        "status":              "ok",
-        "servicio":            "SRI Proxy v2 — San Joaquín Artesanía Cárnica",
-        "firma_disponible":    FIRMA_DISPONIBLE,
-        "p12_en_servidor":     bool(P12_B64),
-        "cors_origin":         ALLOWED_ORIGIN,
-        "email_configurado":   bool(GMAIL_USER and GMAIL_PASSWORD),
-        "admin_email":         ADMIN_EMAIL,
+        "status":                "ok",
+        "servicio":              "SRI Proxy v2 — San Joaquín Artesanía Cárnica",
+        "firma_disponible":      FIRMA_DISPONIBLE,
+        "p12_en_servidor":       bool(P12_B64),
+        "payphone_configurado":  bool(PAYPHONE_TOKEN),
+        "cors_origin":           ALLOWED_ORIGIN,
+        "email_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
+        "admin_email":           ADMIN_EMAIL,
     })
 
 
@@ -527,9 +531,11 @@ def payphone_link():
     Respuesta: URL string (ej. https://payp.page.link/aYu55)
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = data.pop("token", "")
+    token = PAYPHONE_TOKEN or data.pop("token", "")
     if not token:
-        return jsonify({"error": "Token de PayPhone requerido"}), 400
+        return jsonify({"error": "PAYPHONE_TOKEN no configurado en el servidor"}), 500
+    else:
+        data.pop("token", None)  # descartar si vino en el body
     try:
         # Guardar token por txId para poder auto-confirmar cuando PayPhone redirige
         tx_id = data.get('clientTransactionId', '')
@@ -565,10 +571,11 @@ def payphone_confirm():
     Respuesta: JSON de PayPhone con transactionStatus (3=aprobado, 2=anulado, 1=pendiente)
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = data.pop("token", "")
+    token = PAYPHONE_TOKEN or data.pop("token", "")
+    data.pop("token", None)
     ctxid = data.get("clientTransactionId", "")
     if not token or not ctxid:
-        return jsonify({"error": "token y clientTransactionId requeridos"}), 400
+        return jsonify({"error": "PAYPHONE_TOKEN no configurado y clientTransactionId requerido"}), 400
     try:
         resp = requests.get(
             f"https://pay.payphonetodoesposible.com/api/sale/client/{ctxid}",
@@ -728,9 +735,10 @@ def payphone_button_confirm():
     Body: { token, id (numeric), clientTransactionId }
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = data.pop("token", "")
+    token = PAYPHONE_TOKEN or data.pop("token", "")
+    data.pop("token", None)
     if not token:
-        return jsonify({"error": "Token requerido"}), 400
+        return jsonify({"error": "PAYPHONE_TOKEN no configurado en el servidor"}), 500
     try:
         logger.info(f"PayPhone button/Confirm payload: {data}")
         resp = requests.post(
@@ -753,10 +761,11 @@ def payphone_status():
     Body JSON: { token, transactionId }
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = data.pop("token", "")
+    token = PAYPHONE_TOKEN or data.pop("token", "")
+    data.pop("token", None)
     tid   = data.get("transactionId", "")
     if not token or not tid:
-        return jsonify({"error": "token y transactionId requeridos"}), 400
+        return jsonify({"error": "PAYPHONE_TOKEN no configurado y transactionId requerido"}), 400
     try:
         resp = requests.get(
             f"https://pay.payphonetodoesposible.com/api/sale?transactionId={tid}",
@@ -766,6 +775,89 @@ def payphone_status():
         return (resp.text, resp.status_code, {"Content-Type": "application/json"})
     except Exception as e:
         logger.exception("Error en /payphone/status")
+        return jsonify({"error": str(e)}), 500
+
+
+# ─── ENVÍO DE FACTURAS POR GMAIL ─────────────────────────────────────────────
+
+@app.route("/send-invoice", methods=["POST", "OPTIONS"])
+@cross_origin()
+@rate_limited
+def send_invoice():
+    """
+    Envía un comprobante de venta por correo usando Gmail SMTP.
+
+    Body JSON:
+        {
+            "to":         "cliente@email.com",
+            "folio":      "FAC-044",
+            "clientName": "Juan Pérez",
+            "pdfBase64":  "<base64 del PDF>",
+            "subject":    "Comprobante FAC-044 - San Joaquín"  (opcional)
+        }
+    """
+    if not GMAIL_USER or not GMAIL_PASSWORD:
+        return jsonify({"error": "GMAIL_USER o GMAIL_APP_PASSWORD no configurados en el servidor"}), 501
+
+    data   = request.get_json(force=True, silent=True) or {}
+    to     = str(data.get("to", "")).strip()
+    folio  = str(data.get("folio", "Comprobante")).strip()
+    name   = str(data.get("clientName", "Cliente")).strip()
+    pdf_b64 = str(data.get("pdfBase64", "")).strip()
+
+    if not to or not pdf_b64:
+        return jsonify({"error": "Campos 'to' y 'pdfBase64' son obligatorios"}), 400
+
+    subject = data.get("subject") or f"Comprobante de compra {folio} – San Joaquín Artesanía Cárnica"
+
+    try:
+        pdf_bytes = base64.b64decode(pdf_b64)
+    except Exception:
+        return jsonify({"error": "pdfBase64 inválido"}), 400
+
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#222;">
+      <div style="background:#8B1A1A;padding:20px 28px;border-radius:8px 8px 0 0;">
+        <h2 style="color:#fff;margin:0;font-size:20px;">San Joaquín Artesanía Cárnica</h2>
+      </div>
+      <div style="padding:24px 28px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;">
+        <p style="margin:0 0 16px;">Estimado/a <strong>{name}</strong>,</p>
+        <p style="margin:0 0 16px;">
+          Adjunto encontrará su comprobante de compra <strong>{folio}</strong>.<br>
+          Gracias por preferirnos.
+        </p>
+        <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
+        <p style="font-size:12px;color:#888;margin:0;">
+          San Joaquín Artesanía Cárnica · Galo Plaza Lasso Km13 vía a Cayambe
+        </p>
+      </div>
+    </div>"""
+
+    try:
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = subject
+        msg["From"]    = GMAIL_USER
+        msg["To"]      = to
+
+        msg.attach(MIMEText(html_body, "html"))
+
+        part = MIMEBase("application", "pdf")
+        part.set_payload(pdf_bytes)
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f'attachment; filename="{folio}.pdf"')
+        msg.attach(part)
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(GMAIL_USER, GMAIL_PASSWORD)
+            server.sendmail(GMAIL_USER, to, msg.as_string())
+
+        logger.info(f"Factura {folio} enviada a {to}")
+        return jsonify({"estado": "OK", "mensaje": f"Correo enviado a {to}"})
+    except smtplib.SMTPAuthenticationError:
+        logger.error("Gmail SMTP: error de autenticación")
+        return jsonify({"error": "Error de autenticación Gmail. Verifica GMAIL_USER y GMAIL_APP_PASSWORD"}), 502
+    except Exception as e:
+        logger.exception("Error enviando factura por correo")
         return jsonify({"error": str(e)}), 500
 
 
