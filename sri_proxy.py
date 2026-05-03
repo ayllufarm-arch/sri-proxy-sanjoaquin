@@ -375,6 +375,32 @@ def verificar_codigo():
     return jsonify({"estado": "OK"})
 
 
+@app.route("/cert-info", methods=["GET"])
+def cert_info():
+    """Muestra información del certificado configurado en P12_B64 (sin exponer clave privada)."""
+    if not P12_B64:
+        return jsonify({"error": "P12_B64 no configurado en variables de entorno"}), 400
+    try:
+        p12_bytes = base64.b64decode(P12_B64)
+        password  = P12_PASS.encode("utf-8") if P12_PASS else None
+        _, cert, chain = pkcs12.load_key_and_certificates(p12_bytes, password, backend=default_backend())
+        from datetime import timezone
+        now = __import__("datetime").datetime.now(timezone.utc)
+        info = {
+            "subject":      cert.subject.rfc4514_string(),
+            "issuer":       cert.issuer.rfc4514_string(),
+            "serial":       str(cert.serial_number),
+            "not_before":   cert.not_valid_before_utc.isoformat(),
+            "not_after":    cert.not_valid_after_utc.isoformat(),
+            "expired":      now > cert.not_valid_after_utc,
+            "valid_now":    cert.not_valid_before_utc <= now <= cert.not_valid_after_utc,
+            "chain_certs":  len(chain) if chain else 0,
+        }
+        return jsonify(info)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
