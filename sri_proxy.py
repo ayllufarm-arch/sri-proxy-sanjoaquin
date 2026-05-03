@@ -264,7 +264,8 @@ def firmar_xml_sri(xml_bytes: bytes, p12_bytes: bytes, p12_password: bytes) -> s
     # Parsear XML
     root = etree.fromstring(xml_bytes)
 
-    # Firmar con XMLDSig — enveloped signature (requerido por SRI)
+    # SRI Ecuador exige Reference URI="#comprobante" (apunta al elemento raíz)
+    # y c14n sin exclusión de namespaces
     signer = XMLSigner(
         method=methods.enveloped,
         signature_algorithm="rsa-sha1",
@@ -276,6 +277,7 @@ def firmar_xml_sri(xml_bytes: bytes, p12_bytes: bytes, p12_password: bytes) -> s
         root,
         key=key_pem,
         cert=cert_pem,
+        reference_uri="#comprobante",
     )
 
     return etree.tostring(signed_root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
