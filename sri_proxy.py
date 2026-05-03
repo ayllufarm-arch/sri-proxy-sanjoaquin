@@ -175,12 +175,23 @@ def build_soap_autorizacion(clave_acceso: str) -> str:
     )
 
 
-def call_sri(url: str, soap_body: str) -> str:
-    """Realiza la llamada SOAP al SRI y devuelve la respuesta en texto."""
+def call_sri(url: str, soap_body: str, retries: int = 2) -> str:
+    """Realiza la llamada SOAP al SRI con reintentos automáticos."""
     headers = {"Content-Type": "text/xml; charset=utf-8", "SOAPAction": '""'}
-    resp = requests.post(url, data=soap_body.encode("utf-8"), headers=headers, timeout=TIMEOUT)
-    resp.raise_for_status()
-    return resp.text
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(url, data=soap_body.encode("utf-8"), headers=headers, timeout=TIMEOUT)
+            resp.raise_for_status()
+            return resp.text
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_exc = e
+            if attempt < retries:
+                logger.warning(f"Intento {attempt+1} fallido → {e}. Reintentando en 3s…")
+                time.sleep(3)
+        except Exception as e:
+            raise
+    raise last_exc
 
 # ─── EMAIL ────────────────────────────────────────────────────────────────────
 
@@ -359,6 +370,26 @@ def health():
         "email_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
         "admin_email":           ADMIN_EMAIL,
     })
+
+
+@app.route("/test-sri", methods=["GET"])
+def test_sri():
+    """Verifica la conectividad con los servidores del SRI desde Railway."""
+    resultados = {}
+    for env, urls in ENDPOINTS.items():
+        for tipo, url in urls.items():
+            key = f"{env}/{tipo}"
+            try:
+                r = requests.get(url + "?wsdl", timeout=10)
+                resultados[key] = {"ok": True, "http": r.status_code}
+            except requests.exceptions.ConnectionError as e:
+                resultados[key] = {"ok": False, "error": "ConnectionError", "detalle": str(e)[:120]}
+            except requests.exceptions.Timeout:
+                resultados[key] = {"ok": False, "error": "Timeout"}
+            except Exception as e:
+                resultados[key] = {"ok": False, "error": type(e).__name__, "detalle": str(e)[:120]}
+    todo_ok = all(v["ok"] for v in resultados.values())
+    return jsonify({"conectividad": "OK" if todo_ok else "FALLO", "endpoints": resultados}), 200
 
 
 @app.route("/firmar", methods=["POST"])
