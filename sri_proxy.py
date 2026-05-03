@@ -46,13 +46,12 @@ from functools import wraps
 from collections import defaultdict
 import time
 
-# Firma digital (XMLDSig para SRI Ecuador)
+# Firma digital (XAdES-BES para SRI Ecuador)
 try:
-    from lxml import etree
     from cryptography.hazmat.primitives.serialization import pkcs12
-    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.backends import default_backend
-    from signxml import XMLSigner, methods
+    from sri_xades_signer import sign_xml
     FIRMA_DISPONIBLE = True
 except Exception as e:
     FIRMA_DISPONIBLE = False
@@ -62,7 +61,7 @@ except Exception as e:
 
 app = Flask(__name__)
 
-ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "http://localhost").strip()
+ALLOWED_ORIGIN = (os.environ.get("ALLOWED_ORIGIN") or os.environ.get("CORS_ORIGIN") or "http://localhost").strip()
 STORE_URL      = os.environ.get("STORE_URL", "https://san-joaquin-artesania-carnica.web.app").strip()
 LOG_LEVEL      = os.environ.get("LOG_LEVEL", "INFO").upper()
 PORT           = int(os.environ.get("PORT", 5000))
@@ -82,7 +81,7 @@ _token_store: dict       = {}   # clientTransactionId -> {token, timestamp}  par
 
 def get_allowed_origins():
     # Soporta múltiples orígenes separados por coma en ALLOWED_ORIGIN
-    raw = os.environ.get("ALLOWED_ORIGIN", "http://localhost")
+    raw = ALLOWED_ORIGIN
     origins = [o.strip() for o in raw.split(",") if o.strip()]
     extra = []
     for o in origins:
@@ -245,6 +244,25 @@ def firmar_xml_sri(xml_bytes: bytes, p12_bytes: bytes, p12_password: bytes) -> s
 
     Implementación manual porque signxml 2.x no resuelve atributos 'id' en minúscula.
     """
+    if not FIRMA_DISPONIBLE:
+        raise RuntimeError("Modulos de firma XAdES no instalados")
+
+    password_text = p12_password.decode("utf-8") if isinstance(p12_password, bytes) else (p12_password or "")
+    xml_text = xml_bytes.decode("utf-8")
+    signed_xml = sign_xml(
+        pkcs12_file=p12_bytes,
+        password=password_text,
+        xml=xml_text,
+        read_file=False,
+    )
+    if isinstance(signed_xml, bytes):
+        signed_xml = signed_xml.decode("utf-8")
+    if "http://uri.etsi.org/01903/v1.3.2#" not in signed_xml:
+        raise RuntimeError("La firma generada no contiene XAdES-BES 1.3.2")
+    if "SignedProperties" not in signed_xml or "QualifyingProperties" not in signed_xml:
+        raise RuntimeError("La firma generada no contiene propiedades XAdES")
+    return signed_xml
+
     import hashlib
     from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
     from cryptography.hazmat.primitives import hashes as crypto_hashes
@@ -406,11 +424,14 @@ def health():
     return jsonify({
         "status":                "ok",
         "servicio":              "SRI Proxy v2 — San Joaquín Artesanía Cárnica",
+        "firma_tipo":            "XAdES-BES 1.3.2 ENVELOPED",
         "firma_disponible":      FIRMA_DISPONIBLE,
         "p12_en_servidor":       bool(P12_B64),
         "payphone_configurado":  bool(PAYPHONE_TOKEN),
         "cors_origin":           ALLOWED_ORIGIN,
-        "email_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
+        "gmail_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
+        "resend_configurado":    bool(RESEND_API_KEY),
+        "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY),
         "admin_email":           ADMIN_EMAIL,
     })
 
