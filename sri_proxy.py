@@ -1063,6 +1063,68 @@ def send_invoice():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/send-email", methods=["POST", "OPTIONS"])
+@cross_origin()
+@rate_limited
+def send_email():
+    """
+    Envía un correo genérico usando Resend API.
+
+    Body JSON:
+        {
+            "to":          [{"email":"...", "name":"..."}],
+            "subject":     "...",
+            "html":        "...",
+            "attachments": [{"filename":"...", "content":"<base64>"}]  (opcional)
+        }
+    """
+    if not RESEND_API_KEY:
+        return jsonify({"error": "RESEND_API_KEY no configurada en el servidor"}), 501
+
+    data        = request.get_json(force=True, silent=True) or {}
+    to_raw      = data.get("to", [])
+    subject     = str(data.get("subject", "Notificación — San Joaquín")).strip()
+    html_body   = str(data.get("html", "")).strip()
+    attachments = data.get("attachments", [])
+
+    if not to_raw or not html_body:
+        return jsonify({"error": "Campos 'to' y 'html' son obligatorios"}), 400
+
+    to_list = []
+    for r in (to_raw if isinstance(to_raw, list) else [to_raw]):
+        if isinstance(r, dict):
+            email = r.get("email", "")
+            name  = r.get("name", "")
+            to_list.append(f"{name} <{email}>" if name else email)
+        else:
+            to_list.append(str(r))
+
+    try:
+        payload = {
+            "from":    f"San Joaquín Artesanía Cárnica <{RESEND_FROM}>",
+            "to":      to_list,
+            "subject": subject,
+            "html":    html_body,
+        }
+        if attachments:
+            payload["attachments"] = attachments
+
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15,
+        )
+        logger.info(f"send-email → {to_list}: HTTP {resp.status_code}")
+        if resp.status_code in (200, 201):
+            return jsonify({"estado": "OK", "mensaje": f"Correo enviado a {len(to_list)} destinatario(s)"})
+        err = resp.json().get("message", resp.text) if resp.content else "Error desconocido"
+        return jsonify({"error": err}), resp.status_code
+    except Exception as e:
+        logger.exception("Error en /send-email")
+        return jsonify({"error": str(e)}), 500
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
