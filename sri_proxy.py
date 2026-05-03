@@ -74,6 +74,10 @@ RESEND_FROM    = os.environ.get("RESEND_FROM", "facturacion@sanjoaquinartesaniac
 P12_B64         = os.environ.get("P12_B64",         "").strip()
 P12_PASS        = os.environ.get("P12_PASS",        "").strip()
 PAYPHONE_TOKEN  = os.environ.get("PAYPHONE_TOKEN",  "").strip()
+LEGACY_PROXY_URL = os.environ.get(
+    "LEGACY_PROXY_URL",
+    "https://sincere-transformation-production-db6a.up.railway.app"
+).strip().rstrip("/")
 
 _verification_codes: dict = {}
 _confirmed_payments: dict = {}   # clientTransactionId -> {confirmed, timestamp, statusCode, raw}
@@ -102,6 +106,51 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 )
 logger = logging.getLogger("sri_proxy")
+
+
+def _forward_to_legacy_proxy():
+    """Reenvia integraciones no migradas al proxy anterior sin exponer secretos."""
+    if not LEGACY_PROXY_URL:
+        return None
+    url = LEGACY_PROXY_URL + request.full_path
+    if url.endswith("?"):
+        url = url[:-1]
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length")
+    }
+    try:
+        resp = requests.request(
+            request.method,
+            url,
+            data=request.get_data(),
+            headers=headers,
+            timeout=30,
+            allow_redirects=False,
+        )
+        return (
+            resp.content,
+            resp.status_code,
+            {"Content-Type": resp.headers.get("Content-Type", "application/json")},
+        )
+    except Exception as e:
+        logger.exception(f"Error reenviando a proxy legado {url}: {e}")
+        return jsonify({"error": "No se pudo conectar con el proxy legado"}), 502
+
+
+@app.before_request
+def legacy_proxy_fallback():
+    """Mantiene PayPhone/correos/admin activos si sus secretos siguen en el proxy viejo."""
+    if request.method == "OPTIONS":
+        return None
+    path = request.path
+    if path.startswith("/payphone/") and not PAYPHONE_TOKEN:
+        return _forward_to_legacy_proxy()
+    if path in ("/enviar-codigo", "/verificar-codigo") and not (GMAIL_USER and GMAIL_PASSWORD):
+        return _forward_to_legacy_proxy()
+    if path == "/send-invoice" and not RESEND_API_KEY:
+        return _forward_to_legacy_proxy()
+    return None
 
 # ─── URLs SRI ────────────────────────────────────────────────────────────────
 
@@ -427,11 +476,13 @@ def health():
         "firma_tipo":            "XAdES-BES 1.3.2 ENVELOPED",
         "firma_disponible":      FIRMA_DISPONIBLE,
         "p12_en_servidor":       bool(P12_B64),
-        "payphone_configurado":  bool(PAYPHONE_TOKEN),
+        "payphone_configurado":  bool(PAYPHONE_TOKEN or LEGACY_PROXY_URL),
+        "payphone_local":        bool(PAYPHONE_TOKEN),
         "cors_origin":           ALLOWED_ORIGIN,
         "gmail_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
         "resend_configurado":    bool(RESEND_API_KEY),
-        "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY),
+        "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY or LEGACY_PROXY_URL),
+        "legacy_fallback":       bool(LEGACY_PROXY_URL),
         "admin_email":           ADMIN_EMAIL,
     })
 
