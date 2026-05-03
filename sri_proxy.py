@@ -238,49 +238,64 @@ def send_verification_email(code: str) -> bool:
 
 def firmar_xml_sri(xml_bytes: bytes, p12_bytes: bytes, p12_password: bytes) -> str:
     """
-    Firma un comprobante XML con el certificado .p12 del SRI Ecuador.
+    Firma XMLDSig manual para SRI Ecuador:
+      - Reference URI="#comprobante", enveloped-signature
+      - RSA-SHA1, digest SHA1
+      - C14N no exclusivo (http://www.w3.org/TR/2001/REC-xml-c14n-20010315)
 
-    Algoritmo: RSA-SHA1 (requerido por SRI Ecuador).
-    Retorna el XML firmado como string UTF-8.
-
-    Referencia: Ficha técnica SRI — Comprobantes Electrónicos versión 2.21
+    Implementación manual porque signxml 2.x no resuelve atributos 'id' en minúscula.
     """
-    if not FIRMA_DISPONIBLE:
-        raise RuntimeError("Módulos de firma no instalados (lxml, signxml, cryptography)")
+    import hashlib
+    from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+    from cryptography.hazmat.primitives import hashes as crypto_hashes
 
-    # Cargar certificado .p12
-    private_key, certificate, chain = pkcs12.load_key_and_certificates(
+    if not FIRMA_DISPONIBLE:
+        raise RuntimeError("Módulos de firma no instalados (lxml, cryptography)")
+
+    private_key, certificate, _ = pkcs12.load_key_and_certificates(
         p12_bytes, p12_password, backend=default_backend()
     )
 
-    # Serializar clave privada y certificado a PEM para signxml
-    key_pem  = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
-    cert_pem = certificate.public_bytes(serialization.Encoding.PEM)
+    cert_b64 = base64.b64encode(
+        certificate.public_bytes(serialization.Encoding.DER)
+    ).decode("ascii")
 
-    # Parsear XML
+    DSIG     = "http://www.w3.org/2000/09/xmldsig#"
+    C14N_URL = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
+
+    # 1. Parsear el XML original
     root = etree.fromstring(xml_bytes)
 
-    # SRI Ecuador exige Reference URI="#comprobante" (apunta al elemento raíz)
-    # y c14n sin exclusión de namespaces
-    signer = XMLSigner(
-        method=methods.enveloped,
-        signature_algorithm="rsa-sha1",
-        digest_algorithm="sha1",
-        c14n_algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
-    )
+    # 2. C14N del elemento raíz (Signature aún no existe) → DigestValue
+    c14n_root = etree.tostring(root, method="c14n", exclusive=False, with_comments=False)
+    digest_b64 = base64.b64encode(hashlib.sha1(c14n_root).digest()).decode("ascii")
 
-    signed_root = signer.sign(
-        root,
-        key=key_pem,
-        cert=cert_pem,
-        reference_uri="#comprobante",
-    )
+    # 3. Construir el árbol Signature dentro del root
+    def sub(parent, tag):
+        return etree.SubElement(parent, f"{{{DSIG}}}{tag}")
 
-    return etree.tostring(signed_root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
+    sig  = sub(root, "Signature")
+    si   = sub(sig,  "SignedInfo")
+    cm   = sub(si,   "CanonicalizationMethod"); cm.set("Algorithm", C14N_URL)
+    sm   = sub(si,   "SignatureMethod");        sm.set("Algorithm", f"{DSIG}rsa-sha1")
+    ref  = sub(si,   "Reference");              ref.set("URI", "#comprobante")
+    trs  = sub(ref,  "Transforms")
+    tr   = sub(trs,  "Transform");              tr.set("Algorithm", f"{DSIG}enveloped-signature")
+    dm   = sub(ref,  "DigestMethod");           dm.set("Algorithm", f"{DSIG}sha1")
+    dv   = sub(ref,  "DigestValue");            dv.text = digest_b64
+    sv   = sub(sig,  "SignatureValue");         sv.text = ""   # placeholder
+    ki   = sub(sig,  "KeyInfo")
+    x9d  = sub(ki,   "X509Data")
+    x9c  = sub(x9d,  "X509Certificate");        x9c.text = cert_b64
+
+    # 4. C14N de SignedInfo EN CONTEXTO del documento (hereda xmlns de Signature padre)
+    c14n_si = etree.tostring(si, method="c14n", exclusive=False, with_comments=False)
+
+    # 5. Firmar SignedInfo con RSA-SHA1
+    sig_bytes = private_key.sign(c14n_si, asym_padding.PKCS1v15(), crypto_hashes.SHA1())
+    sv.text   = base64.b64encode(sig_bytes).decode("ascii")
+
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
 
 
 @app.route("/enviar-codigo", methods=["POST"])
