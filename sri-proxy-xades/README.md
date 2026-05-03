@@ -10,17 +10,29 @@ endpoints que usa `admin.html`:
 - `POST /firmar`
 - `POST /recepcion`
 - `POST /autorizacion`
+- `POST /enviar-codigo`
+- `POST /verificar-codigo`
+- `POST /send-invoice`
+- `POST /payphone/*`
 
 ## Variables de entorno
 
 - `P12_B64`: certificado `.p12/.pfx` en base64.
 - `P12_PASS`: contrasena del certificado.
 - `CORS_ORIGIN`: origenes permitidos, separados por coma.
+- `RESEND_API_KEY`: API key de Resend para enviar codigos admin y facturas PDF.
+- `RESEND_FROM`: correo remitente verificado en Resend.
+- `RESEND_FROM_NAME`: nombre del remitente.
+- `ADMIN_EMAIL`: correo que recibe codigos de acceso admin.
+- `PAYPHONE_TOKEN`: token de PayPhone Business.
 
 Ejemplo:
 
 ```text
 CORS_ORIGIN=https://sanjoaquinartesaniacarnica.com,https://san-joaquin-artesania-carnica.web.app
+RESEND_FROM=facturacion@sanjoaquinartesaniacarnica.com
+RESEND_FROM_NAME=San Joaquin Artesania Carnica
+ADMIN_EMAIL=ayllu.farm@gmail.com
 ```
 
 ## Railway

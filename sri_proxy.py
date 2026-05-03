@@ -70,14 +70,12 @@ GMAIL_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL", "ayllu.farm@gmail.com")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
 RESEND_FROM    = os.environ.get("RESEND_FROM", "facturacion@sanjoaquinartesaniacarnica.com").strip()
+RESEND_FROM_NAME = os.environ.get("RESEND_FROM_NAME", "San Joaquin Artesania Carnica").strip()
 
 P12_B64         = os.environ.get("P12_B64",         "").strip()
 P12_PASS        = os.environ.get("P12_PASS",        "").strip()
 PAYPHONE_TOKEN  = os.environ.get("PAYPHONE_TOKEN",  "").strip()
-LEGACY_PROXY_URL = os.environ.get(
-    "LEGACY_PROXY_URL",
-    "https://sincere-transformation-production-db6a.up.railway.app"
-).strip().rstrip("/")
+LEGACY_PROXY_URL = os.environ.get("LEGACY_PROXY_URL", "").strip().rstrip("/")
 
 _verification_codes: dict = {}
 _confirmed_payments: dict = {}   # clientTransactionId -> {confirmed, timestamp, statusCode, raw}
@@ -146,7 +144,7 @@ def legacy_proxy_fallback():
     path = request.path
     if path.startswith("/payphone/") and not PAYPHONE_TOKEN:
         return _forward_to_legacy_proxy()
-    if path in ("/enviar-codigo", "/verificar-codigo") and not (GMAIL_USER and GMAIL_PASSWORD):
+    if path in ("/enviar-codigo", "/verificar-codigo") and not ((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY):
         return _forward_to_legacy_proxy()
     if path == "/send-invoice" and not RESEND_API_KEY:
         return _forward_to_legacy_proxy()
@@ -243,9 +241,47 @@ def call_sri(url: str, soap_body: str, retries: int = 2) -> str:
 
 # ─── EMAIL ────────────────────────────────────────────────────────────────────
 
+def send_resend_verification_email(code: str) -> bool:
+    """Send the admin verification code through Resend."""
+    html = f"""
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:32px;
+                border:1px solid #e0e0e0;border-radius:8px;">
+      <h2 style="color:#c0392b;margin-top:0;">San Joaquin Artesania Carnica</h2>
+      <p>Se solicito crear una cuenta de administrador en el sistema.</p>
+      <div style="background:#f8f8f8;border-radius:6px;padding:20px;text-align:center;
+                  font-size:36px;font-weight:bold;letter-spacing:8px;color:#222;">
+        {code}
+      </div>
+      <p style="color:#888;font-size:13px;margin-top:20px;">
+        Este codigo expira en <strong>10 minutos</strong>.<br>
+        Si no solicitaste esto, ignora este mensaje.
+      </p>
+    </div>"""
+    try:
+        payload = {
+            "from": f"{RESEND_FROM_NAME} <{RESEND_FROM}>",
+            "to": [ADMIN_EMAIL],
+            "subject": f"[San Joaquin] Codigo de verificacion: {code}",
+            "html": html,
+        }
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15,
+        )
+        logger.info(f"Resend codigo admin -> {ADMIN_EMAIL}: HTTP {resp.status_code} {resp.text[:200]}")
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        logger.error(f"Error enviando codigo por Resend: {e}")
+        return False
+
+
 def send_verification_email(code: str) -> bool:
-    """Envía el código de verificación a ADMIN_EMAIL vía Gmail SMTP."""
-    if not GMAIL_USER or not GMAIL_PASSWORD:
+    """Envia el codigo de verificacion a ADMIN_EMAIL por Resend o Gmail SMTP."""
+    if RESEND_API_KEY:
+        return send_resend_verification_email(code)
+    if not ((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY):
         logger.warning("GMAIL_USER o GMAIL_APP_PASSWORD no configurados")
         return False
     try:
@@ -379,10 +415,10 @@ def enviar_codigo():
 
     El código se guarda en memoria por 10 minutos.
     """
-    if not GMAIL_USER or not GMAIL_PASSWORD:
+    if not ((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY):
         return jsonify({
             "error": "El servidor de correo no está configurado.",
-            "solucion": "Configura GMAIL_USER y GMAIL_APP_PASSWORD en las variables de entorno."
+            "solucion": "Configura RESEND_API_KEY o GMAIL_USER/GMAIL_APP_PASSWORD en las variables de entorno."
         }), 501
 
     # Limpiar códigos expirados
@@ -399,7 +435,7 @@ def enviar_codigo():
 
     ok = send_verification_email(code)
     if not ok:
-        return jsonify({"error": "No se pudo enviar el correo. Revisa la configuración SMTP."}), 502
+        return jsonify({"error": "No se pudo enviar el correo. Revisa la configuracion de Resend o SMTP."}), 502
 
     # Ocultar parte del email en la respuesta (privacidad)
     parts   = ADMIN_EMAIL.split("@")
@@ -476,12 +512,12 @@ def health():
         "firma_tipo":            "XAdES-BES 1.3.2 ENVELOPED",
         "firma_disponible":      FIRMA_DISPONIBLE,
         "p12_en_servidor":       bool(P12_B64),
-        "payphone_configurado":  bool(PAYPHONE_TOKEN or LEGACY_PROXY_URL),
+        "payphone_configurado":  bool(PAYPHONE_TOKEN),
         "payphone_local":        bool(PAYPHONE_TOKEN),
         "cors_origin":           ALLOWED_ORIGIN,
         "gmail_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
         "resend_configurado":    bool(RESEND_API_KEY),
-        "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY or LEGACY_PROXY_URL),
+        "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY),
         "legacy_fallback":       bool(LEGACY_PROXY_URL),
         "admin_email":           ADMIN_EMAIL,
     })
@@ -978,7 +1014,7 @@ def send_invoice():
 
     try:
         payload = {
-            "from": f"San Joaquín Artesanía Cárnica <{RESEND_FROM}>",
+            "from": f"{RESEND_FROM_NAME} <{RESEND_FROM}>",
             "to":   [to],
             "subject": subject,
             "html": html_body,
