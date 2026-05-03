@@ -992,11 +992,17 @@ def send_invoice():
     pdf_b64 = str(data.get("pdfBase64", "")).strip()
     xml_b64 = str(data.get("xmlBase64", "")).strip()
     xml_filename = str(data.get("xmlFilename", "")).strip() or f"{folio}.xml"
+    extra_attachments = data.get("extraAttachments") or []
 
     if not to or not pdf_b64:
         return jsonify({"error": "Campos 'to' y 'pdfBase64' son obligatorios"}), 400
 
-    subject = data.get("subject") or f"Comprobante de compra {folio} – San Joaquín Artesanía Cárnica"
+    subject = data.get("subject") or f"Comprobante de compra {folio} - San Joaquin Artesania Carnica"
+    attachment_note = (
+        "Adjuntamos el RIDE en PDF y el XML autorizado por el SRI."
+        if xml_b64 or extra_attachments
+        else "Adjuntamos el RIDE en PDF."
+    )
 
     html_body = f"""
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#222;">
@@ -1007,6 +1013,7 @@ def send_invoice():
         <p style="margin:0 0 16px;">Estimado/a <strong>{name}</strong>,</p>
         <p style="margin:0 0 16px;">
           Adjunto encontrará su comprobante de compra <strong>{folio}</strong>.<br>
+          {attachment_note}<br>
           Gracias por preferirnos.
         </p>
         <hr style="border:none;border-top:1px solid #eee;margin:20px 0;">
@@ -1017,9 +1024,21 @@ def send_invoice():
     </div>"""
 
     try:
-        attachments = [{"filename": f"{folio}.pdf", "content": pdf_b64}]
+        attachments = [{"filename": f"{folio}.pdf", "content": pdf_b64, "content_type": "application/pdf"}]
         if xml_b64:
-            attachments.append({"filename": xml_filename, "content": xml_b64})
+            attachments.append({"filename": xml_filename, "content": xml_b64, "content_type": "application/xml"})
+        if isinstance(extra_attachments, list):
+            for att in extra_attachments:
+                if not isinstance(att, dict):
+                    continue
+                filename = str(att.get("filename") or att.get("name") or "").strip()
+                content = str(att.get("content") or "").strip()
+                if filename and content and not any(a.get("filename") == filename for a in attachments):
+                    attachments.append({
+                        "filename": filename,
+                        "content": content,
+                        "content_type": str(att.get("content_type") or "application/octet-stream")
+                    })
 
         payload = {
             "from": f"{RESEND_FROM_NAME} <{RESEND_FROM}>",
@@ -1036,7 +1055,7 @@ def send_invoice():
         )
         logger.info(f"Resend {folio} → {to}: HTTP {resp.status_code} {resp.text[:200]}")
         if resp.status_code in (200, 201):
-            return jsonify({"estado": "OK", "mensaje": f"Correo enviado a {to}"})
+            return jsonify({"estado": "OK", "mensaje": f"Correo enviado a {to}", "attachments": len(attachments)})
         err = resp.json().get("message", resp.text)
         return jsonify({"error": err}), resp.status_code
     except Exception as e:
