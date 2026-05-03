@@ -69,6 +69,8 @@ PORT           = int(os.environ.get("PORT", 5000))
 GMAIL_USER     = os.environ.get("GMAIL_USER", "")
 GMAIL_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL", "ayllu.farm@gmail.com")
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+RESEND_FROM    = os.environ.get("RESEND_FROM", "facturacion@sanjoaquinartesaniacarnica.com").strip()
 
 P12_B64         = os.environ.get("P12_B64",         "").strip()
 P12_PASS        = os.environ.get("P12_PASS",        "").strip()
@@ -778,14 +780,14 @@ def payphone_status():
         return jsonify({"error": str(e)}), 500
 
 
-# ─── ENVÍO DE FACTURAS POR GMAIL ─────────────────────────────────────────────
+# ─── ENVÍO DE FACTURAS VÍA RESEND ────────────────────────────────────────────
 
 @app.route("/send-invoice", methods=["POST", "OPTIONS"])
 @cross_origin()
 @rate_limited
 def send_invoice():
     """
-    Envía un comprobante de venta por correo usando Gmail SMTP.
+    Envía un comprobante de venta por correo usando Resend API (HTTPS).
 
     Body JSON:
         {
@@ -793,27 +795,22 @@ def send_invoice():
             "folio":      "FAC-044",
             "clientName": "Juan Pérez",
             "pdfBase64":  "<base64 del PDF>",
-            "subject":    "Comprobante FAC-044 - San Joaquín"  (opcional)
+            "subject":    "..."  (opcional)
         }
     """
-    if not GMAIL_USER or not GMAIL_PASSWORD:
-        return jsonify({"error": "GMAIL_USER o GMAIL_APP_PASSWORD no configurados en el servidor"}), 501
+    if not RESEND_API_KEY:
+        return jsonify({"error": "RESEND_API_KEY no configurada en el servidor"}), 501
 
-    data   = request.get_json(force=True, silent=True) or {}
-    to     = str(data.get("to", "")).strip()
-    folio  = str(data.get("folio", "Comprobante")).strip()
-    name   = str(data.get("clientName", "Cliente")).strip()
+    data    = request.get_json(force=True, silent=True) or {}
+    to      = str(data.get("to", "")).strip()
+    folio   = str(data.get("folio", "Comprobante")).strip()
+    name    = str(data.get("clientName", "Cliente")).strip()
     pdf_b64 = str(data.get("pdfBase64", "")).strip()
 
     if not to or not pdf_b64:
         return jsonify({"error": "Campos 'to' y 'pdfBase64' son obligatorios"}), 400
 
     subject = data.get("subject") or f"Comprobante de compra {folio} – San Joaquín Artesanía Cárnica"
-
-    try:
-        pdf_bytes = base64.b64decode(pdf_b64)
-    except Exception:
-        return jsonify({"error": "pdfBase64 inválido"}), 400
 
     html_body = f"""
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#222;">
@@ -834,30 +831,26 @@ def send_invoice():
     </div>"""
 
     try:
-        msg = MIMEMultipart("mixed")
-        msg["Subject"] = subject
-        msg["From"]    = GMAIL_USER
-        msg["To"]      = to
-
-        msg.attach(MIMEText(html_body, "html"))
-
-        part = MIMEBase("application", "pdf")
-        part.set_payload(pdf_bytes)
-        encoders.encode_base64(part)
-        part.add_header("Content-Disposition", f'attachment; filename="{folio}.pdf"')
-        msg.attach(part)
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GMAIL_USER, GMAIL_PASSWORD)
-            server.sendmail(GMAIL_USER, to, msg.as_string())
-
-        logger.info(f"Factura {folio} enviada a {to}")
-        return jsonify({"estado": "OK", "mensaje": f"Correo enviado a {to}"})
-    except smtplib.SMTPAuthenticationError:
-        logger.error("Gmail SMTP: error de autenticación")
-        return jsonify({"error": "Error de autenticación Gmail. Verifica GMAIL_USER y GMAIL_APP_PASSWORD"}), 502
+        payload = {
+            "from": f"San Joaquín Artesanía Cárnica <{RESEND_FROM}>",
+            "to":   [to],
+            "subject": subject,
+            "html": html_body,
+            "attachments": [{"filename": f"{folio}.pdf", "content": pdf_b64}]
+        }
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=15
+        )
+        logger.info(f"Resend {folio} → {to}: HTTP {resp.status_code} {resp.text[:200]}")
+        if resp.status_code in (200, 201):
+            return jsonify({"estado": "OK", "mensaje": f"Correo enviado a {to}"})
+        err = resp.json().get("message", resp.text)
+        return jsonify({"error": err}), resp.status_code
     except Exception as e:
-        logger.exception("Error enviando factura por correo")
+        logger.exception("Error enviando factura por Resend")
         return jsonify({"error": str(e)}), 500
 
 
