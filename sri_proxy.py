@@ -977,6 +977,8 @@ def send_invoice():
             "folio":      "FAC-044",
             "clientName": "Juan Pérez",
             "pdfBase64":  "<base64 del PDF>",
+            "xmlBase64":  "<base64 del XML autorizado>"  (opcional),
+            "xmlFilename": "..."  (opcional),
             "subject":    "..."  (opcional)
         }
     """
@@ -988,6 +990,8 @@ def send_invoice():
     folio   = str(data.get("folio", "Comprobante")).strip()
     name    = str(data.get("clientName", "Cliente")).strip()
     pdf_b64 = str(data.get("pdfBase64", "")).strip()
+    xml_b64 = str(data.get("xmlBase64", "")).strip()
+    xml_filename = str(data.get("xmlFilename", "")).strip() or f"{folio}.xml"
 
     if not to or not pdf_b64:
         return jsonify({"error": "Campos 'to' y 'pdfBase64' son obligatorios"}), 400
@@ -1013,12 +1017,16 @@ def send_invoice():
     </div>"""
 
     try:
+        attachments = [{"filename": f"{folio}.pdf", "content": pdf_b64}]
+        if xml_b64:
+            attachments.append({"filename": xml_filename, "content": xml_b64})
+
         payload = {
             "from": f"{RESEND_FROM_NAME} <{RESEND_FROM}>",
             "to":   [to],
             "subject": subject,
             "html": html_body,
-            "attachments": [{"filename": f"{folio}.pdf", "content": pdf_b64}]
+            "attachments": attachments
         }
         resp = requests.post(
             "https://api.resend.com/emails",
