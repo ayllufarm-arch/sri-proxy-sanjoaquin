@@ -517,6 +517,7 @@ def health():
         "cors_origin":           ALLOWED_ORIGIN,
         "gmail_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
         "resend_configurado":    bool(RESEND_API_KEY),
+        "send_email_endpoint":   True,
         "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY),
         "legacy_fallback":       bool(LEGACY_PROXY_URL),
         "admin_email":           ADMIN_EMAIL,
