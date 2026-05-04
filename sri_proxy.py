@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# BUILD_VERSION: 2026-05-04-v2
 """
 sri_proxy.py — Proxy CORS + Firma Digital para Web Services SRI Ecuador
 San Joaquín Artesanía Cárnica
@@ -518,6 +519,7 @@ def health():
         "gmail_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
         "resend_configurado":    bool(RESEND_API_KEY),
         "send_email_endpoint":   True,
+        "build_version":         "2026-05-04-v2",
         "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY),
         "legacy_fallback":       bool(LEGACY_PROXY_URL),
         "admin_email":           ADMIN_EMAIL,
