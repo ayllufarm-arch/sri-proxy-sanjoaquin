@@ -29,6 +29,7 @@ Endpoints:
     POST /autorizacion  — Consultar autorización por clave de acceso
 """
 
+import hmac
 import os
 import logging
 import re
@@ -72,6 +73,15 @@ ADMIN_EMAIL    = os.environ.get("ADMIN_EMAIL", "ayllu.farm@gmail.com")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
 RESEND_FROM    = os.environ.get("RESEND_FROM", "facturacion@sanjoaquinartesaniacarnica.com").strip()
 RESEND_FROM_NAME = os.environ.get("RESEND_FROM_NAME", "San Joaquin Artesania Carnica").strip()
+
+# ── Control de acceso a endpoints privilegiados ───────────────────────────────
+# PROXY_API_KEY      — secreto compartido. Vacio = control INACTIVO.
+# PROXY_AUTH_ENFORCE — "true" para exigirlo. Separado de la presencia de la clave
+#                      a proposito: permite desplegar, observar en logs quien
+#                      llama sin credencial, y recien entonces cerrar. Encenderlo
+#                      antes de migrar al consumidor deja al negocio sin facturar.
+PROXY_API_KEY   = os.environ.get("PROXY_API_KEY",   "").strip()
+PROXY_AUTH_ENFORCE = os.environ.get("PROXY_AUTH_ENFORCE", "").strip().lower() == "true"
 
 P12_B64         = os.environ.get("P12_B64",         "").strip()
 P12_PASS        = os.environ.get("P12_PASS",        "").strip()
@@ -171,6 +181,28 @@ TIMEOUT = 30  # segundos
 RATE_LIMIT     = 20
 RATE_WINDOW    = 60  # segundos
 _rate_store    = defaultdict(list)
+
+def requiere_credencial(f):
+    """Exige un secreto compartido en cabecera para endpoints privilegiados.
+
+    No acepta el secreto por query string: las URLs acaban en logs de acceso, en
+    el historial del navegador y en cabeceras Referer.
+
+    Comparacion en tiempo constante, para no filtrar el secreto por temporizacion.
+    El valor recibido nunca se registra, ni truncado.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        recibido = request.headers.get("X-Proxy-Key", "")
+        valido = bool(PROXY_API_KEY) and hmac.compare_digest(recibido, PROXY_API_KEY)
+        if not valido:
+            logger.warning("Peticion sin credencial valida a %s (enforce=%s)",
+                           request.path, PROXY_AUTH_ENFORCE)
+            if PROXY_AUTH_ENFORCE:
+                return jsonify({"error": "No autorizado"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 
 def rate_limited(f):
     @wraps(f)
@@ -480,6 +512,7 @@ def verificar_codigo():
 
 
 @app.route("/cert-info", methods=["GET"])
+@requiere_credencial
 def cert_info():
     """Muestra información del certificado configurado en P12_B64 (sin exponer clave privada)."""
     if not P12_B64:
@@ -515,14 +548,12 @@ def health():
         "p12_en_servidor":       bool(P12_B64),
         "payphone_configurado":  bool(PAYPHONE_TOKEN),
         "payphone_local":        bool(PAYPHONE_TOKEN),
-        "cors_origin":           ALLOWED_ORIGIN,
         "gmail_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
         "resend_configurado":    bool(RESEND_API_KEY),
         "send_email_endpoint":   True,
         "build_version":         "2026-05-04-v2",
         "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY),
         "legacy_fallback":       bool(LEGACY_PROXY_URL),
-        "admin_email":           ADMIN_EMAIL,
     })
 
 
@@ -547,6 +578,7 @@ def test_sri():
 
 
 @app.route("/firmar", methods=["POST"])
+@requiere_credencial
 @rate_limited
 def firmar():
     """
@@ -611,6 +643,7 @@ def firmar():
 
 
 @app.route("/recepcion", methods=["POST"])
+@requiere_credencial
 @rate_limited
 def recepcion():
     """
@@ -658,6 +691,7 @@ def recepcion():
 
 
 @app.route("/autorizacion", methods=["POST"])
+@requiere_credencial
 @rate_limited
 def autorizacion():
     """
@@ -871,6 +905,7 @@ def payphone_webhook():
 
 
 @app.route("/payphone/debug", methods=["GET"])
+@requiere_credencial
 @cross_origin()
 def payphone_debug():
     """Muestra pagos recibidos vía webhook (solo para diagnóstico)."""
@@ -968,6 +1003,7 @@ def payphone_status():
 # ─── ENVÍO DE FACTURAS VÍA RESEND ────────────────────────────────────────────
 
 @app.route("/send-invoice", methods=["POST", "OPTIONS"])
+@requiere_credencial
 @cross_origin()
 @rate_limited
 def send_invoice():
@@ -1067,6 +1103,7 @@ def send_invoice():
 
 
 @app.route("/send-email", methods=["POST", "OPTIONS"])
+@requiere_credencial
 @cross_origin()
 @rate_limited
 def send_email():
