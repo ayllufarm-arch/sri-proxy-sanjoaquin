@@ -41,7 +41,18 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-import firebase_auth
+# Import defensivo, siguiendo el mismo patron que los modulos de firma de abajo.
+# Este repo tiene nueve commits peleando con la cache de build de Railway: si una
+# dependencia nueva no se instala, un import duro tumba el servicio entero y el
+# negocio no puede facturar. Degradar es preferible a no arrancar.
+try:
+    import firebase_auth
+    IDENTIDAD_DISPONIBLE = True
+except Exception as _e:  # noqa: BLE001
+    firebase_auth = None
+    IDENTIDAD_DISPONIBLE = False
+    logging.warning("Verificacion de identidad no disponible: %s", _e)
+
 from flask import Flask, g, request, jsonify, redirect
 from flask_cors import CORS, cross_origin
 import requests
@@ -207,6 +218,15 @@ def requiere_identidad(permiso):
             # a proposito: permite migrar el navegador sin cortar nada.
             if PROXY_API_KEY and hmac.compare_digest(
                     request.headers.get("X-Proxy-Key", ""), PROXY_API_KEY):
+                return f(*args, **kwargs)
+            if not IDENTIDAD_DISPONIBLE:
+                # Sin el modulo no se puede verificar a nadie. En modo
+                # observacion se deja pasar, como hasta ahora; con la exigencia
+                # activa se cierra, porque no verificar no es autorizar.
+                logger.warning("Identidad no verificable en %s: modulo ausente",
+                               request.path)
+                if AUTH_ENFORCE:
+                    return jsonify({"error": "Verificacion no disponible"}), 503
                 return f(*args, **kwargs)
             try:
                 claims = firebase_auth.verificar_id_token(token, FIREBASE_PROJECT_ID)
