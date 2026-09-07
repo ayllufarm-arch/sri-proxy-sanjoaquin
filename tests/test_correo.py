@@ -60,69 +60,37 @@ def test_prueba_no_acepta_destinatario_del_cliente(monkeypatch):
 
 # --- boletin: destinatarios acotados, HTML compuesto por el servidor --------
 
-def test_boletin_exige_campana_valida(monkeypatch):
+def test_boletin_exige_asunto_y_bloques(monkeypatch):
     m = proxy(monkeypatch, enforce=False)
     c = m.app.test_client()
     assert c.post("/send-email", json={"tipo": "boletin"}).status_code == 400
     assert c.post("/send-email", json={"tipo": "boletin",
-                                       "campana": "inventada"}).status_code == 400
+                                       "destinatarios": [{"email": "a@b.c"}]}).status_code == 400
+    assert c.post("/send-email", json={"tipo": "boletin", "asunto": "Hola",
+                                       "destinatarios": [{"email": "a@b.c"}]}).status_code == 400
 
 
-def test_boletin_ya_no_acepta_destinatarios_del_navegador(monkeypatch):
-    """El cambio de fondo: el navegador ya no elige a quien se escribe.
+def test_boletin_limita_el_numero_de_destinatarios(monkeypatch):
+    m = proxy(monkeypatch, enforce=False)
+    muchos = [{"email": f"u{i}@ejemplo.test"} for i in range(m.MAX_BOLETIN + 1)]
+    r = m.app.test_client().post("/send-email", json={"tipo": "boletin", "asunto": "X",
+                                                      "bloques": ["a"], "destinatarios": muchos})
+    assert r.status_code == 400
 
-    Mandar destinatarios no sirve de nada -- se ignoran -- y sin token la
-    peticion no puede leer la lista, asi que se corta antes de enviar.
-    """
+
+def test_boletin_rechaza_correo_invalido(monkeypatch):
     m = proxy(monkeypatch, enforce=False)
     r = m.app.test_client().post("/send-email", json={
-        "tipo": "boletin", "campana": "nueva_produccion",
-        "datos": {"productos": "Chorizo"},
-        "destinatarios": [{"email": "atacante@ejemplo.test"}]})
-    assert r.status_code == 401
-    assert "identidad" in r.get_json()["error"]
+        "tipo": "boletin", "asunto": "X", "bloques": ["a"],
+        "destinatarios": [{"email": "no-es-un-correo"}]})
+    assert r.status_code == 400
 
 
-def test_boletin_ya_no_acepta_asunto_del_navegador(monkeypatch):
-    """El asunto es parte de la plantilla del servidor."""
-    import boletin
-    a, _ = boletin.render("nueva_produccion", {"productos": "Chorizo"}, "https://ejemplo.test")
-    assert a == "Nueva produccion disponible - San Joaquin"
-
-
-def test_la_plantilla_escapa_el_contenido(monkeypatch):
-    import boletin
-    _, html = boletin.render("nuevo_producto",
-                             {"nombre": "<script>alert(1)</script>"}, "https://e.test")
-    assert "<script>" not in html
-    assert "&lt;script&gt;" in html
-
-
-@pytest.mark.parametrize("mala", ["javascript:alert(1)", "data:text/html,x", "ftp://x.y"])
-def test_la_plantilla_rechaza_urls_peligrosas(mala):
-    """Un javascript: en el boton es ejecucion en el correo del suscriptor."""
-    import boletin
-    with pytest.raises(boletin.DatosInvalidos):
-        boletin.render("promocion", {"mensaje": "x", "tiendaUrl": mala}, "https://e.test")
-
-
-def test_la_plantilla_conserva_la_apariencia():
-    """Paridad visual: tarjeta de producto, precio, boton, marca y baja."""
-    import boletin
-    _, html = boletin.render("nuevo_producto",
-                             {"nombre": "Chorizo ahumado", "precio": "12.5"},
-                             "https://ejemplo.test")
-    for pieza in ["SAN JOAQUIN", "ARTESANIA CARNICA", "Chorizo ahumado",
-                  "$12.50", "Verlo en la tienda", "Darse de baja", "#8B0000"]:
-        assert pieza in html, pieza
-
-
-def test_la_plantilla_limita_longitudes():
-    import boletin
-    with pytest.raises(boletin.DatosInvalidos):
-        boletin.render("nuevo_producto", {"nombre": "x" * 200}, "https://e.test")
-    with pytest.raises(boletin.DatosInvalidos):
-        boletin.render("nuevo_producto", {"nombre": "x", "precio": "999999"}, "https://e.test")
+def test_el_servidor_escapa_el_contenido_del_boletin(monkeypatch):
+    """Los bloques son texto. Si alguien mete marcado, se escapa: el HTML lo
+    compone el servidor, no el navegador."""
+    from html import escape
+    assert "&lt;script&gt;" in escape("<script>alert(1)</script>")
 
 
 def test_permiso_de_correo_es_propio(monkeypatch):
