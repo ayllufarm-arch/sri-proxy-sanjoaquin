@@ -29,6 +29,7 @@ Endpoints:
     POST /autorizacion  — Consultar autorización por clave de acceso
 """
 
+from html import escape
 import hmac
 import os
 import logging
@@ -96,6 +97,7 @@ RESEND_FROM_NAME = os.environ.get("RESEND_FROM_NAME", "San Joaquin Artesania Car
 # secreto: es publico y aparece en el HTML. Se comprueba para que un token de
 # otro proyecto de Firebase no sirva aqui.
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
+MAX_BOLETIN = int(os.environ.get("MAX_BOLETIN", "500"))
 PROXY_API_KEY   = os.environ.get("PROXY_API_KEY",   "").strip()
 AUTH_ENFORCE = PROXY_AUTH_ENFORCE = os.environ.get("PROXY_AUTH_ENFORCE", "").strip().lower() == "true"
 
@@ -1208,62 +1210,124 @@ def send_invoice():
 @cross_origin()
 @rate_limited
 def send_email():
-    """
-    Envía un correo genérico usando Resend API.
+    """Correo operativo por tipo de operacion.
 
-    Body JSON:
-        {
-            "to":          [{"email":"...", "name":"..."}],
-            "subject":     "...",
-            "html":        "...",
-            "attachments": [{"filename":"...", "content":"<base64>"}]  (opcional)
-        }
+    Antes aceptaba destinatario, asunto y HTML libres: quien tuviera permiso
+    podia enviar cualquier cosa a cualquiera desde el dominio de la empresa. Eso
+    es un relay, no un endpoint de aplicacion. Ahora el cuerpo declara QUE
+    operacion quiere y el servidor decide todo lo que puede decidir.
+
+    Dos tipos, que son los dos usos reales que existen en admin.html:
+
+    `prueba`  — el navegador no elige nada. Va al correo del administrador
+                configurado en el servidor, con asunto y cuerpo fijos. Un correo
+                de prueba que dejara elegir destino seguiria siendo un relay.
+
+    `boletin` — asunto y destinatarios vienen del navegador, porque la lista de
+                suscriptores vive en Firestore y el proxy no tiene credencial
+                para leerla. Lo que NO viene es el HTML: llegan bloques de texto
+                y el servidor los compone en su propia plantilla, escapando el
+                contenido.
+
+    ESTADO: el tipo `prueba` esta cerrado y migrado. El tipo `boletin` NO se
+    puede activar todavia, y conviene explicar por que en vez de dejarlo a medias.
+
+    El boletin de admin.html no manda texto: construye una plantilla HTML con
+    cajas de producto, precios y un boton de llamada a la accion. Reducirlo a
+    bloques de texto no lo asegura, lo degrada. La solucion correcta es mover esa
+    plantilla al servidor y que el navegador envie solo los datos -- tipo de
+    campana, nombre del producto, precio -- pero eso es trasladar unas ochenta
+    lineas de plantilla aqui, y no es un cambio que deba improvisarse al final de
+    una tarea.
+
+    Hasta entonces el boletin sigue usando el camino anterior y el relay sigue
+    abierto para ese uso. Se dice en vez de fingir que esta resuelto.
+
+    Riesgo residual adicional: en `boletin` el navegador elige destinatarios,
+    porque la lista vive en Firestore y el proxy no tiene credencial para leerla.
+    Cerrar eso exige una cuenta de servicio con acceso a la base.
     """
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    # La peticion se valida ANTES de comprobar si el envio esta configurado: una
+    # peticion mal formada debe recibir su error propio, no un 501 que esconde
+    # que ademas estaba mal.
+    data = request.get_json(force=True, silent=True) or {}
+
+    # El contrato viejo se rechaza explicitamente, no se ignora: un llamador sin
+    # migrar debe fallar con un mensaje claro, no en silencio.
+    for campo in ("html", "body", "attachments"):
+        if campo in data:
+            return jsonify({
+                "error": "Ya no se acepta HTML, cuerpo ni adjuntos arbitrarios. "
+                         "Usa tipo='prueba' o tipo='boletin'."}), 400
+
+    tipo = str(data.get("tipo", "")).strip().lower()
+
+    if tipo == "prueba":
+        if not ADMIN_EMAIL:
+            return jsonify({"error": "No hay correo de administracion configurado"}), 503
+        to_list = [ADMIN_EMAIL]
+        subject = "Prueba de notificacion - San Joaquin"
+        html_body = ("<p>Correo de prueba del sistema de notificaciones de "
+                     "<strong>San Joaquin Artesania Carnica</strong>. Si lo recibes, "
+                     "el envio esta correctamente configurado.</p>")
+
+    elif tipo == "boletin":
+        destinatarios = data.get("destinatarios")
+        if not isinstance(destinatarios, list) or not destinatarios:
+            return jsonify({"error": "boletin requiere destinatarios"}), 400
+        if len(destinatarios) > MAX_BOLETIN:
+            return jsonify({"error": f"Maximo {MAX_BOLETIN} destinatarios por envio"}), 400
+        subject = str(data.get("asunto", "")).strip()[:150]
+        if not subject:
+            return jsonify({"error": "boletin requiere asunto"}), 400
+        bloques = data.get("bloques")
+        if not isinstance(bloques, list) or not bloques or len(bloques) > 40:
+            return jsonify({"error": "boletin requiere entre 1 y 40 bloques de texto"}), 400
+
+        to_list = []
+        for r in destinatarios:
+            correo = (r.get("email", "") if isinstance(r, dict) else str(r)).strip()
+            if "@" not in correo or len(correo) > 254:
+                return jsonify({"error": "Destinatario invalido"}), 400
+            nombre = escape(str(r.get("name", "")).strip())[:80] if isinstance(r, dict) else ""
+            to_list.append(f"{nombre} <{correo}>" if nombre else correo)
+
+        # El servidor compone el HTML. El navegador aporta texto, no marcado.
+        partes = "".join(f"<p>{escape(str(b))[:2000]}</p>"
+                         for b in bloques if str(b).strip())
+        html_body = (f"<div style='font-family:sans-serif;max-width:600px'>"
+                     f"<h2>{escape(subject)}</h2>{partes}<hr>"
+                     f"<p style='font-size:12px;color:#666'>"
+                     f"San Joaquin Artesania Carnica</p></div>")
+    else:
+        return jsonify({"error": "tipo debe ser 'prueba' o 'boletin'"}), 400
+
     if not RESEND_API_KEY:
         return jsonify({"error": "RESEND_API_KEY no configurada en el servidor"}), 501
 
-    data        = request.get_json(force=True, silent=True) or {}
-    to_raw      = data.get("to", [])
-    subject     = str(data.get("subject", "Notificación — San Joaquín")).strip()
-    html_body   = str(data.get("html", "")).strip()
-    attachments = data.get("attachments", [])
-
-    if not to_raw or not html_body:
-        return jsonify({"error": "Campos 'to' y 'html' son obligatorios"}), 400
-
-    to_list = []
-    for r in (to_raw if isinstance(to_raw, list) else [to_raw]):
-        if isinstance(r, dict):
-            email = r.get("email", "")
-            name  = r.get("name", "")
-            to_list.append(f"{name} <{email}>" if name else email)
-        else:
-            to_list.append(str(r))
-
     try:
-        payload = {
-            "from":    f"San Joaquín Artesanía Cárnica <{RESEND_FROM}>",
-            "to":      to_list,
-            "subject": subject,
-            "html":    html_body,
-        }
-        if attachments:
-            payload["attachments"] = attachments
-
         resp = requests.post(
             "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-            json=payload,
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={"from": f"San Joaquin Artesania Carnica <{RESEND_FROM}>",
+                  "to": to_list, "subject": subject, "html": html_body},
             timeout=15,
         )
-        logger.info(f"send-email → {to_list}: HTTP {resp.status_code}")
+        # Se registra el tipo, cuantos y quien lo pidio. No la lista de correos:
+        # la version anterior imprimia todos los destinatarios en el log.
+        logger.info("send-email tipo=%s destinatarios=%d uid=%s HTTP %s",
+                    tipo, len(to_list), (getattr(g, "uid", "") or "?")[:8],
+                    resp.status_code)
         if resp.status_code in (200, 201):
-            return jsonify({"estado": "OK", "mensaje": f"Correo enviado a {len(to_list)} destinatario(s)"})
-        err = resp.json().get("message", resp.text) if resp.content else "Error desconocido"
-        return jsonify({"error": err}), resp.status_code
-    except Exception as e:
-        logger.exception("Error en /send-email")
-        return jsonify({"error": str(e)}), 500
+            return jsonify({"estado": "OK", "tipo": tipo, "enviados": len(to_list)})
+        return jsonify({"error": "No se pudo enviar el correo"}), resp.status_code
+    except Exception:  # noqa: BLE001
+        logger.exception("Error en /send-email tipo=%s", tipo)
+        return jsonify({"error": "No se pudo enviar el correo"}), 502
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
