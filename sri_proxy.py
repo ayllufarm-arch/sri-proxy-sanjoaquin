@@ -46,6 +46,8 @@ from email import encoders
 # Este repo tiene nueve commits peleando con la cache de build de Railway: si una
 # dependencia nueva no se instala, un import duro tumba el servicio entero y el
 # negocio no puede facturar. Degradar es preferible a no arrancar.
+import boletin
+
 try:
     import firebase_auth
     IDENTIDAD_DISPONIBLE = True
@@ -1275,33 +1277,31 @@ def send_email():
                      "el envio esta correctamente configurado.</p>")
 
     elif tipo == "boletin":
-        destinatarios = data.get("destinatarios")
-        if not isinstance(destinatarios, list) or not destinatarios:
-            return jsonify({"error": "boletin requiere destinatarios"}), 400
-        if len(destinatarios) > MAX_BOLETIN:
-            return jsonify({"error": f"Maximo {MAX_BOLETIN} destinatarios por envio"}), 400
-        subject = str(data.get("asunto", "")).strip()[:150]
-        if not subject:
-            return jsonify({"error": "boletin requiere asunto"}), 400
-        bloques = data.get("bloques")
-        if not isinstance(bloques, list) or not bloques or len(bloques) > 40:
-            return jsonify({"error": "boletin requiere entre 1 y 40 bloques de texto"}), 400
+        # El navegador manda datos; el asunto y el HTML los compone el servidor.
+        try:
+            subject, html_body = boletin.render(
+                str(data.get("campana", "")).strip(),
+                data.get("datos") or {},
+                STORE_URL)
+        except boletin.DatosInvalidos as e:
+            return jsonify({"error": str(e)}), 400
 
-        to_list = []
-        for r in destinatarios:
-            correo = (r.get("email", "") if isinstance(r, dict) else str(r)).strip()
-            if "@" not in correo or len(correo) > 254:
-                return jsonify({"error": "Destinatario invalido"}), 400
-            nombre = escape(str(r.get("name", "")).strip())[:80] if isinstance(r, dict) else ""
-            to_list.append(f"{nombre} <{correo}>" if nombre else correo)
+        # Los destinatarios se leen de Firestore con el token de quien llama, asi
+        # que el navegador no elige a quien se escribe y las reglas se aplican.
+        token = request.headers.get("Authorization", "")[7:].strip()
+        if not token:
+            return jsonify({"error": "El boletin requiere identidad para leer la lista"}), 401
+        try:
+            correos = boletin.suscriptores(FIREBASE_PROJECT_ID, token, MAX_BOLETIN)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except Exception:  # noqa: BLE001
+            logger.exception("No se pudo leer la lista de suscriptores")
+            return jsonify({"error": "No se pudo leer la lista de suscriptores"}), 502
+        if not correos:
+            return jsonify({"error": "No hay suscriptores"}), 400
+        to_list = correos
 
-        # El servidor compone el HTML. El navegador aporta texto, no marcado.
-        partes = "".join(f"<p>{escape(str(b))[:2000]}</p>"
-                         for b in bloques if str(b).strip())
-        html_body = (f"<div style='font-family:sans-serif;max-width:600px'>"
-                     f"<h2>{escape(subject)}</h2>{partes}<hr>"
-                     f"<p style='font-size:12px;color:#666'>"
-                     f"San Joaquin Artesania Carnica</p></div>")
     else:
         return jsonify({"error": "tipo debe ser 'prueba' o 'boletin'"}), 400
 
