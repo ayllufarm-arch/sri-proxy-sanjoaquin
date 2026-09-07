@@ -41,7 +41,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from flask import Flask, request, jsonify, redirect
+import firebase_auth
+from flask import Flask, g, request, jsonify, redirect
 from flask_cors import CORS, cross_origin
 import requests
 from functools import wraps
@@ -80,8 +81,12 @@ RESEND_FROM_NAME = os.environ.get("RESEND_FROM_NAME", "San Joaquin Artesania Car
 #                      a proposito: permite desplegar, observar en logs quien
 #                      llama sin credencial, y recien entonces cerrar. Encenderlo
 #                      antes de migrar al consumidor deja al negocio sin facturar.
+# FIREBASE_PROJECT_ID — identifica el proyecto cuyos tokens se aceptan. NO es un
+# secreto: es publico y aparece en el HTML. Se comprueba para que un token de
+# otro proyecto de Firebase no sirva aqui.
+FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
 PROXY_API_KEY   = os.environ.get("PROXY_API_KEY",   "").strip()
-PROXY_AUTH_ENFORCE = os.environ.get("PROXY_AUTH_ENFORCE", "").strip().lower() == "true"
+AUTH_ENFORCE = PROXY_AUTH_ENFORCE = os.environ.get("PROXY_AUTH_ENFORCE", "").strip().lower() == "true"
 
 P12_B64         = os.environ.get("P12_B64",         "").strip()
 P12_PASS        = os.environ.get("P12_PASS",        "").strip()
@@ -181,6 +186,46 @@ TIMEOUT = 30  # segundos
 RATE_LIMIT     = 20
 RATE_WINDOW    = 60  # segundos
 _rate_store    = defaultdict(list)
+
+def requiere_identidad(permiso):
+    """Exige un ID token de Firebase valido y un permiso fiscal concreto.
+
+    Sustituye a la credencial compartida para las llamadas que vienen del
+    navegador. La diferencia importa: un secreto compartido en el navegador es un
+    secreto publicado, mientras que un ID token es del usuario, caduca solo y
+    dice quien es.
+
+    401 si no hay identidad. 403 si la hay pero no alcanza. Son casos distintos y
+    conviene que el operador los distinga.
+    """
+    def decorador(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            cabecera = request.headers.get("Authorization", "")
+            token = cabecera[7:].strip() if cabecera.lower().startswith("bearer ") else ""
+            # La compatibilidad con la credencial servidor-a-servidor se mantiene
+            # a proposito: permite migrar el navegador sin cortar nada.
+            if PROXY_API_KEY and hmac.compare_digest(
+                    request.headers.get("X-Proxy-Key", ""), PROXY_API_KEY):
+                return f(*args, **kwargs)
+            try:
+                claims = firebase_auth.verificar_id_token(token, FIREBASE_PROJECT_ID)
+            except firebase_auth.AuthError as e:
+                # Se registra el motivo y la ruta, nunca el token ni un fragmento.
+                logger.warning("Identidad rechazada en %s: %s", request.path, e.motivo)
+                if AUTH_ENFORCE:
+                    return jsonify({"error": e.motivo}), e.http
+                return f(*args, **kwargs)
+            if not firebase_auth.tiene_permiso(claims, permiso):
+                logger.warning("uid %s sin permiso %s en %s",
+                               claims.get("sub", "?")[:8], permiso, request.path)
+                if AUTH_ENFORCE:
+                    return jsonify({"error": "Sin permiso para esta operacion"}), 403
+            g.uid = claims.get("sub")
+            return f(*args, **kwargs)
+        return decorated
+    return decorador
+
 
 def requiere_credencial(f):
     """Exige un secreto compartido en cabecera para endpoints privilegiados.
@@ -578,7 +623,7 @@ def test_sri():
 
 
 @app.route("/firmar", methods=["POST"])
-@requiere_credencial
+@requiere_identidad("invoice:sign")
 @rate_limited
 def firmar():
     """
@@ -643,7 +688,7 @@ def firmar():
 
 
 @app.route("/recepcion", methods=["POST"])
-@requiere_credencial
+@requiere_identidad("sri:issue")
 @rate_limited
 def recepcion():
     """
@@ -691,7 +736,7 @@ def recepcion():
 
 
 @app.route("/autorizacion", methods=["POST"])
-@requiere_credencial
+@requiere_identidad("sri:read")
 @rate_limited
 def autorizacion():
     """
@@ -1003,7 +1048,7 @@ def payphone_status():
 # ─── ENVÍO DE FACTURAS VÍA RESEND ────────────────────────────────────────────
 
 @app.route("/send-invoice", methods=["POST", "OPTIONS"])
-@requiere_credencial
+@requiere_identidad("invoice:send")
 @cross_origin()
 @rate_limited
 def send_invoice():
@@ -1103,7 +1148,7 @@ def send_invoice():
 
 
 @app.route("/send-email", methods=["POST", "OPTIONS"])
-@requiere_credencial
+@requiere_identidad("email:send")
 @cross_origin()
 @rate_limited
 def send_email():

@@ -3,3 +3,5 @@ flask-cors==4.0.1
 requests==2.32.3
 gunicorn==22.0.0
 sri-xades-signer==1.0.0
+PyJWT==2.9.0
+cryptography
