@@ -812,7 +812,7 @@ def payphone_link():
         webhook_url = request.url_root.rstrip('/') + '/payphone/webhook'
         data.setdefault('notifyUrl', webhook_url)
         data.setdefault('confirmPaymentUrl', webhook_url)
-        logger.info(f"PayPhone /api/Links token prefix: {token[:12]}... storeId: {data.get('storeId')} amount: {data.get('amount')}")
+        logger.info("PayPhone /api/Links storeId=%s amount=%s", data.get("storeId"), data.get("amount"))
         resp = requests.post(
             "https://pay.payphonetodoesposible.com/api/Links",
             json=data,
@@ -875,10 +875,16 @@ def payphone_webhook():
         payment_id = request.args.get('paymentId', '')
         logger.info(f"[Webhook GET] Redirect de PayPhone: txId={tx_id} id={pp_id}")
 
-        # AUTO-CONFIRMAR con /api/button/Confirm usando el token guardado al crear el link.
+        # PayPhone no firma sus notificaciones -- su documentacion solo exige
+        # HTTPS -- asi que este Confirm es ademas la comprobacion de
+        # autenticidad: un aviso inventado no confirma contra su API.
+        # AUTO-CONFIRMAR con /api/button/Confirm.
         # Debe llamarse dentro de los 5 minutos post-pago o PayPhone revierte la transacción.
-        stored = _token_store.get(tx_id, {})
-        token  = stored.get("token", "")
+        # El token se deriva del entorno, no de la memoria del proceso. Con dos
+        # workers de gunicorn lo que guardaba uno no existia para el otro, asi
+        # que la confirmacion dependia de que PayPhone volviera al mismo worker.
+        # Es la misma credencial: al crear el link se usa PAYPHONE_TOKEN.
+        token = PAYPHONE_TOKEN or _token_store.get(tx_id, {}).get("token", "")
         if token and pp_id:
             try:
                 conf_resp = requests.post(

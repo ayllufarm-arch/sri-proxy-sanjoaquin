@@ -134,3 +134,20 @@ def test_health_sigue_publico_y_minimo(monkeypatch):
     assert d["status"] == "ok"
     assert "cors_origin" not in d
     assert "admin_email" not in d
+
+
+# --- PayPhone: estado y secretos -------------------------------------------
+
+def test_el_token_de_payphone_no_se_registra(monkeypatch, caplog):
+    """El log imprimia los 12 primeros caracteres del token. Un prefijo de un
+    secreto sigue siendo parte del secreto."""
+    fuente = open("sri_proxy.py", encoding="utf-8", errors="ignore").read()
+    assert "token[:12]" not in fuente
+    assert "token prefix" not in fuente
+
+
+def test_la_confirmacion_no_depende_de_la_memoria_del_proceso(monkeypatch):
+    """Con dos workers, el token guardado por uno no existia para el otro: la
+    confirmacion del pago dependia de a que worker volviera PayPhone."""
+    fuente = open("sri_proxy.py", encoding="utf-8", errors="ignore").read()
+    assert "token = PAYPHONE_TOKEN or _token_store.get" in fuente
