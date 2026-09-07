@@ -9,10 +9,9 @@ XML_B = b"<factura>B</factura>"
 
 
 @pytest.fixture(autouse=True)
-def limpio():
-    idem._registro.clear()
+def limpio(tmp_path, monkeypatch):
+    monkeypatch.setattr(idem, "DIRECTORIO", str(tmp_path / "idem"))
     yield
-    idem._registro.clear()
 
 
 def test_primera_vez_se_procesa():
@@ -68,3 +67,27 @@ def test_el_xml_no_se_normaliza():
     comprobante se tratan como distintas: el lado seguro del error."""
     assert idem.huella(b"<a> </a>") != idem.huella(b"<a></a>")
     assert idem.huella("<a/>") == idem.huella(b"<a/>")
+
+
+def test_atomico_entre_procesos(tmp_path):
+    """La prueba que importa: procesos separados, no hilos.
+
+    Se lanzan varios subprocesos reales -- como los workers de gunicorn -- con la
+    misma clave. Exactamente uno debe ganar la reserva.
+    """
+    import subprocess, sys, os, json as _json
+    d = str(tmp_path / "cruce")
+    codigo = (
+        "import os,sys;os.environ['IDEMPOTENCIA_DIR']=sys.argv[1];"
+        "sys.path.insert(0,os.getcwd());import idempotencia as i;"
+        "i.DIRECTORIO=sys.argv[1];"
+        "print('GANA' if i.reservar('9'*49, b'<x/>')==(None,None) else 'REPLAY')"
+    )
+    salidas = []
+    procesos = [subprocess.Popen([sys.executable, "-c", codigo, d],
+                                 stdout=subprocess.PIPE, text=True)
+                for _ in range(6)]
+    for p in procesos:
+        out, _ = p.communicate(timeout=30)
+        salidas.append(out.strip().splitlines()[-1] if out.strip() else "ERROR")
+    assert salidas.count("GANA") == 1, salidas
