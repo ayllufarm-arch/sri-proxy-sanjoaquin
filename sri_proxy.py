@@ -247,6 +247,36 @@ def requiere_identidad(permiso):
     return decorador
 
 
+def solo_interno(f):
+    """Cierra un endpoint que ningun navegador llama. Siempre.
+
+    Distinto de `requiere_credencial`: aquel respeta el interruptor de
+    compatibilidad, porque los endpoints fiscales los llama admin.html y cerrarlos
+    antes de migrar el navegador dejaria al negocio sin facturar. Estos no: nadie
+    los llama desde un navegador, asi que no hay nada que migrar y no hay motivo
+    para que dependan de una bandera.
+
+    Ese acoplamiento fue un error mio de diseno: ate toda la proteccion a un solo
+    interruptor por uniformidad, y el resultado fue que /cert-info y
+    /payphone/debug quedaron publicos en produccion despues del despliegue de
+    contencion.
+
+    Falla cerrado. Si PROXY_API_KEY no esta configurada, se rechaza: una
+    configuracion ausente no puede convertir un endpoint interno en publico.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not PROXY_API_KEY:
+            logger.error("Endpoint interno %s sin PROXY_API_KEY configurada: "
+                         "se rechaza por defecto", request.path)
+            return jsonify({"error": "No disponible"}), 503
+        if not hmac.compare_digest(request.headers.get("X-Proxy-Key", ""), PROXY_API_KEY):
+            logger.warning("Acceso interno rechazado en %s", request.path)
+            return jsonify({"error": "No autorizado"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
 def requiere_credencial(f):
     """Exige un secreto compartido en cabecera para endpoints privilegiados.
 
@@ -577,7 +607,7 @@ def verificar_codigo():
 
 
 @app.route("/cert-info", methods=["GET"])
-@requiere_credencial
+@solo_interno
 def cert_info():
     """Muestra información del certificado configurado en P12_B64 (sin exponer clave privada)."""
     if not P12_B64:
@@ -976,7 +1006,7 @@ def payphone_webhook():
 
 
 @app.route("/payphone/debug", methods=["GET"])
-@requiere_credencial
+@solo_interno
 @cross_origin()
 def payphone_debug():
     """Muestra pagos recibidos vía webhook (solo para diagnóstico)."""

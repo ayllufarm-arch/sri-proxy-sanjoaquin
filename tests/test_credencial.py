@@ -151,3 +151,58 @@ def test_la_confirmacion_no_depende_de_la_memoria_del_proceso(monkeypatch):
     confirmacion del pago dependia de a que worker volviera PayPhone."""
     fuente = open("sri_proxy.py", encoding="utf-8", errors="ignore").read()
     assert "token = PAYPHONE_TOKEN or _token_store.get" in fuente
+
+
+# --- endpoints internos: protegidos SIEMPRE, no segun el interruptor ---------
+
+INTERNOS = ["/cert-info", "/payphone/debug"]
+
+
+@pytest.mark.parametrize("ruta", INTERNOS)
+def test_interno_cerrado_aunque_el_interruptor_fiscal_este_apagado(monkeypatch, ruta):
+    """El fallo que llego a produccion: con AUTH_ENFORCE=false estos quedaban
+    publicos, porque compartian interruptor con los endpoints fiscales."""
+    m = recargar(monkeypatch, clave="secreto-de-prueba", enforce=False)
+    assert m.app.test_client().get(ruta).status_code == 401
+
+
+@pytest.mark.parametrize("ruta", INTERNOS)
+def test_interno_cerrado_con_el_interruptor_encendido(monkeypatch, ruta):
+    m = recargar(monkeypatch, clave="secreto-de-prueba", enforce=True)
+    assert m.app.test_client().get(ruta).status_code == 401
+
+
+@pytest.mark.parametrize("ruta", INTERNOS)
+def test_interno_falla_cerrado_sin_clave_configurada(monkeypatch, ruta):
+    """Una configuracion ausente no puede volver publico un endpoint interno."""
+    m = recargar(monkeypatch, clave="", enforce=False)
+    assert m.app.test_client().get(ruta).status_code == 503
+
+
+@pytest.mark.parametrize("ruta", INTERNOS)
+def test_interno_abre_con_la_credencial_correcta(monkeypatch, ruta):
+    m = recargar(monkeypatch, clave="secreto-de-prueba", enforce=False)
+    r = m.app.test_client().get(ruta, headers={"X-Proxy-Key": "secreto-de-prueba"})
+    assert r.status_code not in (401, 403, 503)
+
+
+@pytest.mark.parametrize("ruta", INTERNOS)
+def test_interno_no_acepta_la_clave_por_query_string(monkeypatch, ruta):
+    m = recargar(monkeypatch, clave="secreto-de-prueba", enforce=False)
+    assert m.app.test_client().get(f"{ruta}?key=secreto-de-prueba").status_code == 401
+
+
+def test_interno_no_registra_la_credencial(monkeypatch, caplog):
+    import logging as _l
+    m = recargar(monkeypatch, clave="secreto-de-prueba", enforce=False)
+    with caplog.at_level(_l.WARNING):
+        m.app.test_client().get("/cert-info", headers={"X-Proxy-Key": "intento-fallido"})
+    assert "secreto-de-prueba" not in caplog.text
+    assert "intento-fallido" not in caplog.text
+
+
+def test_los_fiscales_SIGUEN_en_compatibilidad(monkeypatch):
+    """Lo que no debe cambiar: con el interruptor apagado, /firmar sin token
+    sigue pasando. Cerrarlo antes de migrar admin.html dejaria de facturar."""
+    m = recargar(monkeypatch, clave="secreto-de-prueba", enforce=False)
+    assert m.app.test_client().post("/firmar", json={}).status_code not in (401, 403)
