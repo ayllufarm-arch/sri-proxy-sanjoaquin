@@ -649,21 +649,21 @@ def cert_info():
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({
-        "status":                "ok",
-        "servicio":              "SRI Proxy v2 — San Joaquín Artesanía Cárnica",
-        "firma_tipo":            "XAdES-BES 1.3.2 ENVELOPED",
-        "firma_disponible":      FIRMA_DISPONIBLE,
-        "p12_en_servidor":       bool(P12_B64),
-        "payphone_configurado":  bool(PAYPHONE_TOKEN),
-        "payphone_local":        bool(PAYPHONE_TOKEN),
-        "gmail_configurado":     bool(GMAIL_USER and GMAIL_PASSWORD),
-        "resend_configurado":    bool(RESEND_API_KEY),
-        "send_email_endpoint":   True,
-        "build_version":         "2026-05-04-v2",
-        "email_configurado":     bool((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY),
-        "legacy_fallback":       bool(LEGACY_PROXY_URL),
-    })
+    """Disponibilidad, y nada mas.
+
+    Publicaba si habia certificado cargado, si PayPhone estaba configurado, que
+    proveedor de correo se usaba y la version del build. Nada de eso lo necesita
+    un consumidor legitimo: el unico que llama aqui es la sonda de la
+    plataforma, y a esa le basta un 200.
+
+    Anunciar `p12_en_servidor: true` le decia a cualquiera que el certificado
+    fiscal estaba cargado en ese proceso. No es explotable por si solo, pero es
+    la clase de dato que convierte un objetivo generico en uno concreto.
+
+    Para diagnostico interno esta /cert-info, que exige PROXY_API_KEY y falla
+    cerrado.
+    """
+    return jsonify({"status": "ok"})
 
 
 @app.route("/test-sri", methods=["GET"])

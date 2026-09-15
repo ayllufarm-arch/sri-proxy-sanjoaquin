@@ -21,19 +21,49 @@ def test_health_responde_200(client):
     assert r.get_json()["status"] == "ok"
 
 
-def test_CORREGIDO_health_ya_no_publica_configuracion(client):
-    """Antes /health publicaba la lista de origenes y el correo del
-    administrador sin pedir credencial. Ya no.
+def test_health_responde_status_ok_y_nada_mas(client):
+    """/health es publico y solo declara disponibilidad.
 
-    `p12_en_servidor` se conserva a proposito: la operacion lo consulta para
-    saber si el servicio puede firmar, y no revela nada que un atacante no
-    averigue igual intentandolo.
+    Antes publicaba si el certificado estaba cargado, si PayPhone estaba
+    configurado, que proveedor de correo se usaba y la version del build.
+    A la sonda de la plataforma le basta un 200; a un desconocido no le sirve
+    nada de eso salvo para elegir objetivo.
+    """
+    r = client.get("/health")
+    assert r.status_code == 200
+    d = r.get_json()
+    assert d == {"status": "ok"}, f"/health devuelve mas de la cuenta: {d}"
+
+
+def test_health_no_filtra_configuracion_ni_secretos(client):
+    """Ni el nombre de las variables, ni su valor, ni nada de Firebase."""
+    cuerpo = client.get("/health").get_data(as_text=True)
+    prohibidos = [
+        # certificado y estado del mismo
+        "p12", "P12", "certificado", "cert",
+        # secretos y sus nombres
+        "PROXY_API_KEY", "PAYPHONE_TOKEN", "RESEND_API_KEY", "GMAIL",
+        "SECRET", "secret", "token", "TOKEN", "password", "PASSWORD",
+        "BEGIN PRIVATE KEY", "BEGIN CERTIFICATE",
+        # Firebase y proyecto
+        "firebase", "FIREBASE", "san-joaquin", "securetoken", "projectId",
+        # dependencias y topologia internas
+        "resend", "gmail", "legacy", "LEGACY", "build_version", "XAdES",
+        "allowed_origin", "ALLOWED_ORIGIN",
+    ]
+    for p in prohibidos:
+        assert p not in cuerpo, f"/health filtra {p!r}: {cuerpo}"
+
+
+def test_health_no_crece_por_accidente(client):
+    """Una respuesta minima tiene que seguir siendolo.
+
+    Sin esto, la proxima vez que alguien anada un campo "solo para depurar"
+    nadie se entera.
     """
     d = client.get("/health").get_json()
-    assert "cors_origin" not in d
-    assert "admin_email" not in d
-    assert d["status"] == "ok"
-
+    assert list(d.keys()) == ["status"], f"/health gano campos: {sorted(d)}"
+    assert len(client.get("/health").get_data()) < 40
 
 def test_firma_no_disponible_se_degrada_sin_romper(client):
     """Si faltan los modulos de firma, el servicio arranca igual y avisa."""
