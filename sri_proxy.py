@@ -216,6 +216,14 @@ def requiere_identidad(permiso):
     def decorador(f):
         @wraps(f)
         def decorated(*args, **kwargs):
+            # El preflight NUNCA lleva credenciales: los navegadores no envian
+            # Authorization en un OPTIONS. Si se le exige identidad, se responde
+            # 401 al preflight y el navegador bloquea la peticion real antes de
+            # emitirla; en la consola aparece "Failed to fetch", sin pista.
+            # Las rutas declaradas solo POST no sufrian esto porque flask-cors
+            # atiende su OPTIONS antes de llegar aqui.
+            if request.method == "OPTIONS":
+                return app.make_default_options_response()
             cabecera = request.headers.get("Authorization", "")
             token = cabecera[7:].strip() if cabecera.lower().startswith("bearer ") else ""
             # La compatibilidad con la credencial servidor-a-servidor se mantiene
@@ -270,6 +278,8 @@ def solo_interno(f):
     """
     @wraps(f)
     def decorated(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return app.make_default_options_response()
         if not PROXY_API_KEY:
             logger.error("Endpoint interno %s sin PROXY_API_KEY configurada: "
                          "se rechaza por defecto", request.path)

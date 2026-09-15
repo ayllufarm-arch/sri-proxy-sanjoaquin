@@ -145,3 +145,35 @@ def test_el_token_no_aparece_en_la_respuesta(proxy, clave):
     tok = token(clave, permisos=["sri:read"])
     r = firmar(proxy, tok)
     assert tok not in r.get_data(as_text=True)
+
+
+def test_el_preflight_no_exige_identidad(proxy):
+    """El OPTIONS de un endpoint protegido no puede pedir credenciales.
+
+    Los navegadores nunca mandan Authorization en un preflight. Exigirla ahi
+    devuelve 401 al preflight, el navegador bloquea la peticion real antes de
+    emitirla y en consola solo aparece "Failed to fetch", sin pista de cual
+    request fallo ni por que.
+
+    Ocurrio en produccion el 15-sep-2026 con /send-invoice y /send-email, que
+    declaran methods=["POST","OPTIONS"] y por eso el OPTIONS entraba al view
+    function. Las rutas declaradas solo POST no lo sufrian porque flask-cors
+    atiende su preflight antes.
+    """
+    cliente = proxy.app.test_client()
+    for ruta in ("/firmar", "/recepcion", "/autorizacion", "/send-email", "/send-invoice"):
+        r = cliente.open(ruta, method="OPTIONS", headers={
+            "Origin": "https://ejemplo.test",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        })
+        assert r.status_code not in (401, 403), \
+            f"el preflight de {ruta} exige identidad: HTTP {r.status_code}"
+
+
+def test_el_post_sigue_exigiendo_identidad_tras_permitir_el_preflight(proxy):
+    """Dejar pasar OPTIONS no puede abrir el POST. Esa seria la regresion."""
+    cliente = proxy.app.test_client()
+    for ruta in ("/firmar", "/recepcion", "/autorizacion", "/send-email", "/send-invoice"):
+        assert cliente.post(ruta, json={}).status_code == 401, \
+            f"{ruta} dejo de exigir identidad en POST"
