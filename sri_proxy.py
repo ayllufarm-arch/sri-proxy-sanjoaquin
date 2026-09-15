@@ -123,8 +123,12 @@ def get_allowed_origins():
             ]
     return origins + extra
 
+# `Authorization` tiene que estar aqui o el navegador nunca llega a enviar la
+# peticion: el preflight responde sin permitirla y el fetch muere antes de
+# salir. Mientras admin.html usaba `fetch` plano solo hacia falta Content-Type;
+# desde que usa proxyFetch, cada llamada fiscal manda el ID token de Firebase.
 CORS(app, origins=get_allowed_origins(), methods=["GET", "POST", "OPTIONS"],
-     allow_headers=["Content-Type"])
+     allow_headers=["Content-Type", "Authorization"])
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),

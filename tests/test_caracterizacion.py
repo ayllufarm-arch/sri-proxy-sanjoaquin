@@ -142,3 +142,31 @@ def test_autorizacion_valida_la_forma_de_clave_acceso(client):
     assert r.status_code == 400
     r = client.post("/autorizacion", json={})
     assert r.status_code == 400
+
+
+# ── CORS y la cabecera Authorization ─────────────────────────────────────────
+# El 14-sep-2026, al unificar el hosting, produccion paso a servir el admin.html
+# que manda el ID token de Firebase en cada llamada fiscal. La config de CORS
+# solo permitia Content-Type, asi que el navegador bloqueaba la peticion en el
+# preflight: no es que el proxy respondiera mal, es que la peticion no llegaba a
+# salir. Estas pruebas impiden que vuelva a ocurrir.
+
+def test_preflight_permite_authorization(client):
+    """Sin esto, proxyFetch no puede hablar con el proxy desde el navegador."""
+    r = client.open("/firmar", method="OPTIONS", headers={
+        "Origin": "https://ejemplo.test",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization,content-type",
+    })
+    permitidas = (r.headers.get("Access-Control-Allow-Headers") or "").lower()
+    assert "authorization" in permitidas, \
+        f"el preflight no permite Authorization: {permitidas!r}"
+    assert "content-type" in permitidas
+
+
+def test_el_401_llega_con_cabeceras_cors(client):
+    """Un 401 sin Access-Control-Allow-Origin le llega al navegador como error de
+    red, no como 401: proxyFetch no podria distinguir sesion caducada de caida
+    del servicio."""
+    r = client.post("/firmar", json={}, headers={"Origin": "https://ejemplo.test"})
+    assert r.headers.get("Access-Control-Allow-Origin") == "https://ejemplo.test"
