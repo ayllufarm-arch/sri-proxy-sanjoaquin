@@ -79,3 +79,36 @@ certificado real: `conftest.py` borra `P12_B64` del entorno a propósito.
 - idempotencia de emisión
 - `_token_store` en memoria
 - los dos `app.py` divergentes
+
+## Pagos: solo el backend (27/09/2026)
+
+`/payphone/link`, `/payphone/confirm`, `/payphone/status`, `/payphone/confirmed/<tx>` y
+`/payphone/button-confirm` eran públicos: cualquiera podía crear enlaces de cobro a nombre del
+comercio o consultar transacciones con datos del pagador. Ahora exigen la cabecera
+`X-SJ-Servicio-Pagos`, que solo envía el backend de la web (Firebase Functions, `commerceStaffApi`).
+
+| Operación | Endpoints |
+|---|---|
+| `crear_enlace` | `/payphone/link` |
+| `consultar` | `/payphone/confirm`, `/payphone/status`, `/payphone/confirmed/<tx>` |
+| `confirmar` | `/payphone/button-confirm` |
+
+- Sin cabecera: 401. Cabecera incorrecta: 403. Sin `PROXY_PAGOS_KEY` (o con menos de 32
+  caracteres): 503. Falla cerrado.
+- No se acepta en su lugar un token de Firebase ni `PROXY_API_KEY`, y la credencial de pagos no
+  abre `/firmar`, `/cert-info` ni `/payphone/debug`.
+- El token de PayPhone sigue siendo `PAYPHONE_TOKEN` de Railway. Ya no se admite un token en el
+  cuerpo de la petición.
+- `/payphone/webhook` sigue público (lo llama PayPhone) y sigue confirmando con `PAYPHONE_TOKEN`.
+  Es la única ruta de pagos que puede reenviarse al proxy legado.
+- Los registros ya no incluyen cuerpos ni respuestas de PayPhone (datos del pagador), solo el
+  código HTTP y el identificador de la transacción.
+
+| Variable nueva | Efecto |
+|---|---|
+| `PROXY_PAGOS_KEY` | credencial de servicio del backend (el mismo valor que el secreto `PROXY_PAGOS_KEY` de Firebase). Vacía = pagos cerrados (503) |
+
+Orden: primero la variable en Railway y el secreto en Firebase, después Functions y la web, y
+por último este código. Mientras tanto, el código anterior ignora la cabecera y sigue funcionando.
+
+Pruebas: `tests/test_pagos_servicio.py`.

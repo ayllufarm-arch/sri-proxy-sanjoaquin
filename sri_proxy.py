@@ -103,6 +103,9 @@ P12_B64         = os.environ.get("P12_B64",         "").strip()
 P12_PASS        = os.environ.get("P12_PASS",        "").strip()
 PAYPHONE_TOKEN  = os.environ.get("PAYPHONE_TOKEN",  "").strip()
 LEGACY_PROXY_URL = os.environ.get("LEGACY_PROXY_URL", "").strip().rstrip("/")
+# Credencial de servicio del backend de San Joaquín (Firebase Functions) para las operaciones de
+# pagos. Distinta de PROXY_API_KEY (mantenimiento) y de los tokens de Firebase del personal.
+PROXY_PAGOS_KEY = os.environ.get("PROXY_PAGOS_KEY", "").strip()
 
 _verification_codes: dict = {}
 _confirmed_payments: dict = {}   # clientTransactionId -> {confirmed, timestamp, statusCode, raw}
@@ -173,7 +176,9 @@ def legacy_proxy_fallback():
     if request.method == "OPTIONS":
         return None
     path = request.path
-    if path.startswith("/payphone/") and not PAYPHONE_TOKEN:
+    # Solo el webhook (público, lo llama PayPhone) puede reenviarse: el resto de /payphone/* exige
+    # la credencial de servicio o la interna, y reenviarlo saltaría esa comprobación.
+    if path == "/payphone/webhook" and not PAYPHONE_TOKEN:
         return _forward_to_legacy_proxy()
     if path in ("/enviar-codigo", "/verificar-codigo") and not ((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY):
         return _forward_to_legacy_proxy()
@@ -289,6 +294,45 @@ def solo_interno(f):
             return jsonify({"error": "No autorizado"}), 401
         return f(*args, **kwargs)
     return decorated
+
+
+# --- pagos: solo el backend, con autorización por operación ------------------
+CABECERA_PAGOS = "X-SJ-Servicio-Pagos"
+# Qué operación representa cada endpoint de pagos. Todas exigen la credencial de servicio del
+# backend; ninguna acepta el token de Firebase del personal, la clave interna PROXY_API_KEY ni una
+# petición anónima. El webhook de PayPhone queda fuera: lo llama PayPhone y no devuelve datos.
+OPERACIONES_PAGOS = {
+    "crear_enlace": "/payphone/link",
+    "consultar": ("/payphone/confirm", "/payphone/status", "/payphone/confirmed/<tx>"),
+    "confirmar": "/payphone/button-confirm",
+}
+
+
+def solo_servicio_pagos(operacion):
+    """Cierra una operación de pagos a todo lo que no sea el backend de San Joaquín.
+
+    Falla cerrado: sin PROXY_PAGOS_KEY configurada (32+ caracteres) responde 503. Nunca registra la
+    credencial recibida ni la esperada.
+    """
+    if operacion not in OPERACIONES_PAGOS:
+        raise ValueError(f"Operación de pagos desconocida: {operacion}")
+
+    def envolver(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if len(PROXY_PAGOS_KEY) < 32:
+                logger.error("Pagos: %s sin PROXY_PAGOS_KEY configurada: se rechaza por defecto", request.path)
+                return jsonify({"error": "Servicio de pagos no disponible"}), 503
+            recibida = request.headers.get(CABECERA_PAGOS, "")
+            if not recibida:
+                logger.warning("Pagos: peticion sin credencial de servicio en %s (%s)", request.path, operacion)
+                return jsonify({"error": "Credencial de servicio requerida"}), 401
+            if not hmac.compare_digest(recibida.encode("utf-8"), PROXY_PAGOS_KEY.encode("utf-8")):
+                logger.warning("Pagos: credencial de servicio invalida en %s (%s)", request.path, operacion)
+                return jsonify({"error": "Credencial de servicio invalida"}), 403
+            return f(*args, **kwargs)
+        return decorated
+    return envolver
 
 
 def requiere_credencial(f):
@@ -851,8 +895,8 @@ def autorizacion():
 
 # ─── PAYPHONE PROXY ──────────────────────────────────────────────────────────
 
-@app.route("/payphone/link", methods=["POST", "OPTIONS"])
-@cross_origin()
+@app.route("/payphone/link", methods=["POST"])
+@solo_servicio_pagos("crear_enlace")
 def payphone_link():
     """
     Proxy para generar un link de pago vía PayPhone (API Links).
@@ -861,11 +905,10 @@ def payphone_link():
     Respuesta: URL string (ej. https://payp.page.link/aYu55)
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = PAYPHONE_TOKEN or data.pop("token", "")
+    data.pop("token", None)  # el token solo sale del servidor
+    token = PAYPHONE_TOKEN
     if not token:
         return jsonify({"error": "PAYPHONE_TOKEN no configurado en el servidor"}), 500
-    else:
-        data.pop("token", None)  # descartar si vino en el body
     try:
         # Guardar token por txId para poder auto-confirmar cuando PayPhone redirige
         tx_id = data.get('clientTransactionId', '')
@@ -883,7 +926,7 @@ def payphone_link():
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=15
         )
-        logger.info(f"PayPhone /api/Links response {resp.status_code}: {resp.text[:300]}")
+        logger.info("PayPhone /api/Links: HTTP %s", resp.status_code)
         return (resp.text, resp.status_code, {"Content-Type": "text/plain"})
     except requests.exceptions.Timeout:
         return jsonify({"error": "PayPhone no respondió a tiempo"}), 504
@@ -892,8 +935,8 @@ def payphone_link():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/payphone/confirm", methods=["POST", "OPTIONS"])
-@cross_origin()
+@app.route("/payphone/confirm", methods=["POST"])
+@solo_servicio_pagos("consultar")
 def payphone_confirm():
     """
     Consulta el estado de un pago por clientTransactionId.
@@ -901,8 +944,8 @@ def payphone_confirm():
     Respuesta: JSON de PayPhone con transactionStatus (3=aprobado, 2=anulado, 1=pendiente)
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = PAYPHONE_TOKEN or data.pop("token", "")
     data.pop("token", None)
+    token = PAYPHONE_TOKEN
     ctxid = data.get("clientTransactionId", "")
     if not token or not ctxid:
         return jsonify({"error": "PAYPHONE_TOKEN no configurado y clientTransactionId requerido"}), 400
@@ -912,7 +955,7 @@ def payphone_confirm():
             headers={"Authorization": f"Bearer {token}"},
             timeout=15
         )
-        logger.info(f"PayPhone confirm {ctxid}: {resp.status_code} {resp.text[:200]}")
+        logger.info("PayPhone confirm %s: HTTP %s", ctxid, resp.status_code)  # sin datos del pagador
         return (resp.text, resp.status_code, {"Content-Type": "application/json"})
     except Exception as e:
         logger.exception("Error en /payphone/confirm")
@@ -930,7 +973,7 @@ def payphone_webhook():
     """
     raw_body = request.data.decode('utf-8', errors='replace')
     logger.info(f"[Webhook] Recibido: method={request.method} content-type={request.content_type}")
-    logger.info(f"[Webhook] Body: {raw_body[:800]}")
+    logger.info("[Webhook] %s bytes recibidos", len(raw_body))  # sin datos del pagador
 
     if request.method in ('GET', 'OPTIONS'):
         # PayPhone redirige el NAVEGADOR del cliente aquí después del pago.
@@ -958,7 +1001,7 @@ def payphone_webhook():
                     timeout=10
                 )
                 raw_conf = conf_resp.text
-                logger.info(f"[Auto-Confirm] {pp_id}/{tx_id}: HTTP {conf_resp.status_code} → {raw_conf[:300]}")
+                logger.info("[Auto-Confirm] %s/%s: HTTP %s", pp_id, tx_id, conf_resp.status_code)
                 try:
                     conf_data = conf_resp.json()
                     if isinstance(conf_data, list):
@@ -1014,7 +1057,7 @@ def payphone_webhook():
         }
         logger.info(f"[Webhook] Guardado en memoria: txId={tx_id} confirmed={aprobado}")
     else:
-        logger.warning(f"[Webhook] Sin clientTransactionId — body: {raw_body[:300]}")
+        logger.warning("[Webhook] Sin clientTransactionId (%s bytes)", len(raw_body))
 
     return jsonify({"estado": "OK"}), 200
 
@@ -1035,8 +1078,8 @@ def payphone_debug():
     return jsonify({"webhooks_recibidos": len(resultado), "pagos": resultado}), 200
 
 
-@app.route("/payphone/confirmed/<path:tx_id>", methods=["GET", "OPTIONS"])
-@cross_origin()
+@app.route("/payphone/confirmed/<path:tx_id>", methods=["GET"])
+@solo_servicio_pagos("consultar")
 def payphone_confirmed(tx_id):
     """
     Consulta si un pago fue confirmado vía webhook de PayPhone.
@@ -1063,8 +1106,8 @@ def payphone_confirmed(tx_id):
     }), 200
 
 
-@app.route("/payphone/button-confirm", methods=["POST", "OPTIONS"])
-@cross_origin()
+@app.route("/payphone/button-confirm", methods=["POST"])
+@solo_servicio_pagos("confirmar")
 def payphone_button_confirm():
     """
     Confirma una transacción via /api/button/Confirm.
@@ -1072,34 +1115,35 @@ def payphone_button_confirm():
     Body: { token, id (numeric), clientTransactionId }
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = PAYPHONE_TOKEN or data.pop("token", "")
     data.pop("token", None)
+    token = PAYPHONE_TOKEN
     if not token:
         return jsonify({"error": "PAYPHONE_TOKEN no configurado en el servidor"}), 500
     try:
-        logger.info(f"PayPhone button/Confirm payload: {data}")
+        logger.info("PayPhone button/Confirm txId=%s", data.get("clientTransactionId", ""))
         resp = requests.post(
             "https://pay.payphonetodoesposible.com/api/button/Confirm",
             json=data,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=15
         )
-        logger.info(f"PayPhone button/Confirm: HTTP {resp.status_code} → {resp.text[:400]}")
+        logger.info("PayPhone button/Confirm: HTTP %s", resp.status_code)
         return (resp.text, resp.status_code, {"Content-Type": "application/json"})
     except Exception as e:
         logger.exception("Error en /payphone/button-confirm")
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/payphone/status", methods=["POST", "OPTIONS"])
+@app.route("/payphone/status", methods=["POST"])
+@solo_servicio_pagos("consultar")
 def payphone_status():
     """
     Proxy para consultar el estado de un pago.
     Body JSON: { token, transactionId }
     """
     data  = request.get_json(force=True, silent=True) or {}
-    token = PAYPHONE_TOKEN or data.pop("token", "")
     data.pop("token", None)
+    token = PAYPHONE_TOKEN
     tid   = data.get("transactionId", "")
     if not token or not tid:
         return jsonify({"error": "PAYPHONE_TOKEN no configurado y transactionId requerido"}), 400
