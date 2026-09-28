@@ -112,3 +112,20 @@ Orden: primero la variable en Railway y el secreto en Firebase, después Functio
 por último este código. Mientras tanto, el código anterior ignora la cabecera y sigue funcionando.
 
 Pruebas: `tests/test_pagos_servicio.py`.
+
+## Correo anónimo cerrado (28/09/2026)
+
+`/enviar-codigo` y `/verificar-codigo` eran anónimos. El primero hacía enviar un correo real a
+`ADMIN_EMAIL` (comprobado en producción el 28/09/2026), y el límite por IP se eludía con
+`X-Forwarded-For`. Eran del alta de cuentas desde el navegador, que la web ya no tiene (el alta la hace
+el backend); ningún componente vigente los llama y no aparecen en los registros del 24 al 27/09.
+
+- Ahora llevan `@solo_interno`: exigen `X-Proxy-Key` = `PROXY_API_KEY`. Sin esa variable (así está
+  producción) responden 503 sin generar ni enviar nada.
+- Dejan de reenviarse al proxy legado (el reenvío corría antes de cualquier comprobación).
+- Inventario automático: ninguna ruta que pueda enviar correo queda sin identidad o clave interna.
+
+Pruebas: `tests/test_correo_anonimo.py` (7 de 10 fallan contra `5d3971c`, todas pasan con el cambio).
+
+Pendiente, fuera de este cambio: `/test-sri` es anónimo (4 GET al WSDL del SRI) y el límite por IP usa
+el primer valor de `X-Forwarded-For`, que controla el cliente.

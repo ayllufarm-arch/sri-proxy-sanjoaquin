@@ -180,8 +180,8 @@ def legacy_proxy_fallback():
     # la credencial de servicio o la interna, y reenviarlo saltaría esa comprobación.
     if path == "/payphone/webhook" and not PAYPHONE_TOKEN:
         return _forward_to_legacy_proxy()
-    if path in ("/enviar-codigo", "/verificar-codigo") and not ((GMAIL_USER and GMAIL_PASSWORD) or RESEND_API_KEY):
-        return _forward_to_legacy_proxy()
+    # /enviar-codigo y /verificar-codigo ya no se reenvían: son internos y el reenvío saltaría esa
+    # comprobación (el mismo motivo que con los pagos).
     if path == "/send-invoice" and not RESEND_API_KEY:
         return _forward_to_legacy_proxy()
     return None
@@ -587,7 +587,12 @@ def firmar_xml_sri(xml_bytes: bytes, p12_bytes: bytes, p12_password: bytes) -> s
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
 
 
+# /enviar-codigo y /verificar-codigo eran del alta de cuentas desde el navegador, que la web ya no tiene
+# (el alta la hace el backend). Anónimos, cualquiera podía hacer enviar correos a administración (el
+# límite por IP se elude con X-Forwarded-For). Quedan solo para mantenimiento: exigen PROXY_API_KEY y,
+# sin ella configurada, responden 503 sin enviar nada.
 @app.route("/enviar-codigo", methods=["POST"])
+@solo_interno
 @rate_limited
 def enviar_codigo():
     """
@@ -630,6 +635,7 @@ def enviar_codigo():
 
 
 @app.route("/verificar-codigo", methods=["POST"])
+@solo_interno
 @rate_limited
 def verificar_codigo():
     """
