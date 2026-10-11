@@ -201,16 +201,45 @@ def test_sin_token_no_se_reenvia_al_proxy_legado(monkeypatch, llamadas):
     assert llamadas == []
 
 
-# --- el webhook de PayPhone sigue público y confirma con el token de Railway ----
+# --- el webhook sigue público; el retorno del navegador ya no confirma (11/10/2026) ----
 
-def test_webhook_get_publico_confirma_y_redirige(monkeypatch, llamadas):
+def test_webhook_get_no_confirma_y_vuelve_a_la_tienda(monkeypatch, llamadas):
+    """API Links no redirige ni necesita /api/button/Confirm (eso es del Botón de Pago). Un GET
+    público que confirmaba transacciones con el token del comercio desaparece: solo vuelve a la
+    tienda, con los parámetros codificados, y la tienda verifica en el servidor."""
     m = recargar(monkeypatch, llamadas)
     r = m.app.test_client().get("/payphone/webhook?id=123&clientTransactionId=SJ1&paymentId=9")
     assert r.status_code == 302
+    assert llamadas == []
+    assert "SJ1" not in m._confirmed_payments
+    assert r.headers["Location"] == f"{m.STORE_URL}?id=123&clientTransactionId=SJ1&paymentId=9"
+    r = m.app.test_client().get("/payphone/webhook?id=1&clientTransactionId=SJ1%26x%3D1")
+    assert r.headers["Location"].endswith("clientTransactionId=SJ1%26x%3D1&paymentId=")
+
+
+def test_enlace_de_un_solo_uso_sin_parametros_del_boton_de_pago(monkeypatch, llamadas):
+    """El backend pide oneTime/expireIn y el proxy los reenvía tal cual. responseUrl, notifyUrl y
+    confirmPaymentUrl no existen en API Links: no se envían aunque lleguen (revisiones antiguas)."""
+    m = recargar(monkeypatch, llamadas)
+    cuerpo = dict(PROTEGIDAS[0][2], oneTime=True, expireIn=1, isAmountEditable=False,
+                  responseUrl="https://otro.test/payphone/webhook")
+    r = m.app.test_client().post("/payphone/link", json=cuerpo, headers={"X-SJ-Servicio-Pagos": CLAVE})
+    assert r.status_code == 200
     (llamada,) = llamadas
-    assert "/api/button/Confirm" in llamada["url"]
-    assert llamada["headers"]["Authorization"] == f"Bearer {TOKEN_PP}"
-    assert m._confirmed_payments["SJ1"]["confirmed"] is True
+    enviado = llamada["json"]
+    assert enviado["oneTime"] is True and enviado["expireIn"] == 1 and enviado["isAmountEditable"] is False
+    for campo in ("responseUrl", "notifyUrl", "confirmPaymentUrl", "token"):
+        assert campo not in enviado
+
+
+def test_el_registro_del_enlace_guarda_el_dominio_y_no_la_ruta(monkeypatch, llamadas, caplog):
+    m = recargar(monkeypatch, llamadas)
+    with caplog.at_level(logging.INFO):
+        m.app.test_client().post("/payphone/link", json=PROTEGIDAS[0][2], headers={"X-SJ-Servicio-Pagos": CLAVE})
+    assert "host=payp.page.link" in caplog.text
+    assert "sintetico" not in caplog.text
+    assert m._host_de_enlace('"https://ppls.me/AbC"') == "ppls.me"
+    assert m._host_de_enlace("no es url") == "-"
 
 
 def test_webhook_post_publico(monkeypatch, llamadas):

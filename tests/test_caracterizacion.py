@@ -132,18 +132,11 @@ def test_VULNERABILIDAD_ACTUAL_cert_info_accesible_sin_credencial(client):
 # Estado en memoria e idempotencia
 # --------------------------------------------------------------------------
 
-def test_VULNERABILIDAD_ACTUAL_estado_de_pagos_vive_en_memoria(client):
-    """`_token_store` es un dict de modulo.
-
-    Con --workers 2, lo que guarda un worker no existe para el otro, y un
-    reinicio lo pierde entero. Afecta a la confirmacion de pagos.
-
-    Al corregir: el estado debe persistirse fuera del proceso.
-    """
-    assert isinstance(sri_proxy._token_store, dict)
-    sri_proxy._token_store["tx-sintetico"] = {"token": "x", "timestamp": 0}
-    assert "tx-sintetico" in sri_proxy._token_store
-    sri_proxy._token_store.pop("tx-sintetico")
+def test_el_token_de_payphone_ya_no_se_guarda_en_memoria(client):
+    """`_token_store` guardaba el token de PayPhone por transacción, en un dict de módulo, para
+    auto-confirmar con /api/button/Confirm cuando PayPhone redirigía. API Links no redirige ni
+    confirma (11/10/2026): el almacén desaparece y nada lo sustituye."""
+    assert not hasattr(sri_proxy, "_token_store")
 
 
 def test_VULNERABILIDAD_ACTUAL_rate_limit_es_por_proceso(client):

@@ -30,6 +30,7 @@ Endpoints:
 """
 
 import hmac
+import json
 import os
 import logging
 import re
@@ -57,6 +58,7 @@ from flask import Flask, g, request, jsonify, redirect
 from flask_cors import CORS, cross_origin
 import requests
 from functools import wraps
+from urllib.parse import urlencode, urlparse
 from collections import defaultdict
 import time
 
@@ -109,7 +111,6 @@ PROXY_PAGOS_KEY = os.environ.get("PROXY_PAGOS_KEY", "").strip()
 
 _verification_codes: dict = {}
 _confirmed_payments: dict = {}   # clientTransactionId -> {confirmed, timestamp, statusCode, raw}
-_token_store: dict       = {}   # clientTransactionId -> {token, timestamp}  para auto-confirmar
 
 def get_allowed_origins():
     # Soporta múltiples orígenes separados por coma en ALLOWED_ORIGIN
@@ -906,39 +907,48 @@ def autorizacion():
 def payphone_link():
     """
     Proxy para generar un link de pago vía PayPhone (API Links).
-    Body JSON: { token, amount, amountWithoutTax, amountWithTax, tax,
-                 currency, storeId, reference, clientTransactionId }
-    Respuesta: URL string (ej. https://payp.page.link/aYu55)
+    Body JSON: { amount, amountWithoutTax, amountWithTax, tax, currency, storeId, reference,
+                 clientTransactionId, oneTime, expireIn, isAmountEditable }
+    Respuesta: la de PayPhone tal cual (hoy un string JSON "https://ppls.me/...").
+
+    API Links no redirige al comercio ni necesita confirmación: no admite responseUrl,
+    notifyUrl ni confirmPaymentUrl (son del Botón de Pago / Cajita), así que no se envían.
+    El pago se conoce consultando PayPhone (/payphone/confirm) o por su Notificación Externa,
+    que recibe el backend (NotificacionPago), no este proxy.
     """
     data  = request.get_json(force=True, silent=True) or {}
     data.pop("token", None)  # el token solo sale del servidor
+    for campo in ("responseUrl", "notifyUrl", "confirmPaymentUrl"):
+        data.pop(campo, None)
     token = PAYPHONE_TOKEN
     if not token:
         return jsonify({"error": "PAYPHONE_TOKEN no configurado en el servidor"}), 500
     try:
-        # Guardar token por txId para poder auto-confirmar cuando PayPhone redirige
-        tx_id = data.get('clientTransactionId', '')
-        if tx_id:
-            _token_store[tx_id] = {"token": token, "timestamp": time.time()}
-            logger.info(f"Token guardado para txId={tx_id}")
-
-        webhook_url = request.url_root.rstrip('/') + '/payphone/webhook'
-        data.setdefault('notifyUrl', webhook_url)
-        data.setdefault('confirmPaymentUrl', webhook_url)
-        logger.info("PayPhone /api/Links storeId=%s amount=%s", data.get("storeId"), data.get("amount"))
+        logger.info("PayPhone /api/Links storeId=%s amount=%s oneTime=%s expireIn=%s",
+                    data.get("storeId"), data.get("amount"), data.get("oneTime"), data.get("expireIn"))
         resp = requests.post(
             "https://pay.payphonetodoesposible.com/api/Links",
             json=data,
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             timeout=15
         )
-        logger.info("PayPhone /api/Links: HTTP %s", resp.status_code)
+        # Solo el estado y el dominio del enlace: la ruta completa es un enlace de cobro.
+        logger.info("PayPhone /api/Links: HTTP %s host=%s", resp.status_code, _host_de_enlace(resp.text))
         return (resp.text, resp.status_code, {"Content-Type": "text/plain"})
     except requests.exceptions.Timeout:
         return jsonify({"error": "PayPhone no respondió a tiempo"}), 504
     except Exception as e:
         logger.exception("Error en /payphone/link")
         return jsonify({"error": str(e)}), 500
+
+
+def _host_de_enlace(texto):
+    """Dominio del enlace que devolvió PayPhone (o "-"), para el registro."""
+    try:
+        valor = json.loads(texto) if texto.strip().startswith('"') else texto.strip()
+        return urlparse(str(valor)).hostname or "-"
+    except Exception:
+        return "-"
 
 
 @app.route("/payphone/confirm", methods=["POST"])
@@ -972,68 +982,27 @@ def payphone_confirm():
 @cross_origin()
 def payphone_webhook():
     """
-    Recibe la Notificación Externa de PayPhone cuando un pago es aprobado.
-    PayPhone hace POST a esta URL automáticamente (server-to-server).
-    Configura esta URL en el portal PayPhone → Configuración → Notificaciones externas.
-    También se inyecta como notifyUrl/confirmPaymentUrl en cada link de pago.
+    Webhook heredado. NO es la Notificación Externa que se registra en PayPhone: esa la recibe el
+    backend (https://sanjoaquinartesaniacarnica.com/api/commerce/tienda/NotificacionPago), que
+    verifica cada aviso consultando PayPhone. El POST de aquí solo guarda en memoria.
+
+    GET: retorno del navegador del Botón de Pago. Ya no confirma nada (11/10/2026): el pago se cobra
+    con API Links, que no redirige ni requiere /api/button/Confirm, y un GET público que confirmaba
+    transacciones con el token del comercio era un riesgo. Solo devuelve a la tienda, que verifica
+    el pago en el servidor.
     """
     raw_body = request.data.decode('utf-8', errors='replace')
     logger.info(f"[Webhook] Recibido: method={request.method} content-type={request.content_type}")
     logger.info("[Webhook] %s bytes recibidos", len(raw_body))  # sin datos del pagador
 
     if request.method in ('GET', 'OPTIONS'):
-        # PayPhone redirige el NAVEGADOR del cliente aquí después del pago.
         tx_id      = request.args.get('clientTransactionId', '')
         pp_id      = request.args.get('id', '')
         payment_id = request.args.get('paymentId', '')
-        logger.info(f"[Webhook GET] Redirect de PayPhone: txId={tx_id} id={pp_id}")
+        logger.info("[Webhook GET] retorno del navegador txId=%s (sin confirmar: API Links no lo usa)", tx_id[:20])
 
-        # PayPhone no firma sus notificaciones -- su documentacion solo exige
-        # HTTPS -- asi que este Confirm es ademas la comprobacion de
-        # autenticidad: un aviso inventado no confirma contra su API.
-        # AUTO-CONFIRMAR con /api/button/Confirm.
-        # Debe llamarse dentro de los 5 minutos post-pago o PayPhone revierte la transacción.
-        # El token se deriva del entorno, no de la memoria del proceso. Con dos
-        # workers de gunicorn lo que guardaba uno no existia para el otro, asi
-        # que la confirmacion dependia de que PayPhone volviera al mismo worker.
-        # Es la misma credencial: al crear el link se usa PAYPHONE_TOKEN.
-        token = PAYPHONE_TOKEN or _token_store.get(tx_id, {}).get("token", "")
-        if token and pp_id:
-            try:
-                conf_resp = requests.post(
-                    "https://pay.payphonetodoesposible.com/api/button/Confirm",
-                    json={"id": int(pp_id), "clientTransactionId": tx_id},
-                    headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                    timeout=10
-                )
-                raw_conf = conf_resp.text
-                logger.info("[Auto-Confirm] %s/%s: HTTP %s", pp_id, tx_id, conf_resp.status_code)
-                try:
-                    conf_data = conf_resp.json()
-                    if isinstance(conf_data, list):
-                        conf_data = conf_data[0] if conf_data else {}
-                    aprobado = (conf_data.get("statusCode") == 3 or
-                                str(conf_data.get("statusCode")) == "3" or
-                                conf_data.get("transactionStatus") == "Approved")
-                except Exception:
-                    aprobado = False
-                    conf_data = {}
-                _confirmed_payments[tx_id] = {
-                    "confirmed":         aprobado,
-                    "timestamp":         time.time(),
-                    "statusCode":        conf_data.get("statusCode"),
-                    "transactionStatus": conf_data.get("transactionStatus"),
-                    "transactionId":     pp_id,
-                    "source":            "auto-confirm",
-                }
-                logger.info(f"[Auto-Confirm] txId={tx_id} aprobado={aprobado}")
-            except Exception as e:
-                logger.exception(f"[Auto-Confirm] Error: {e}")
-        else:
-            logger.warning(f"[Auto-Confirm] Sin token para txId={tx_id} — no se puede confirmar")
-
-        # Redirigir al store con los params para que también procese en el navegador
-        store_redirect = f"{STORE_URL}?id={pp_id}&clientTransactionId={tx_id}&paymentId={payment_id}"
+        # Vuelve a la tienda con los parámetros codificados; la tienda verifica el pago en el servidor.
+        store_redirect = f"{STORE_URL}?{urlencode({'id': pp_id, 'clientTransactionId': tx_id, 'paymentId': payment_id})}"
         return redirect(store_redirect, code=302)
 
     data = request.get_json(force=True, silent=True) or {}

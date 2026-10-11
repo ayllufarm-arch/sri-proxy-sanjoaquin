@@ -146,11 +146,14 @@ def test_el_token_de_payphone_no_se_registra(monkeypatch, caplog):
     assert "token prefix" not in fuente
 
 
-def test_la_confirmacion_no_depende_de_la_memoria_del_proceso(monkeypatch):
-    """Con dos workers, el token guardado por uno no existia para el otro: la
-    confirmacion del pago dependia de a que worker volviera PayPhone."""
+def test_el_retorno_del_navegador_no_confirma_con_el_token_del_comercio(monkeypatch):
+    """El GET público de /payphone/webhook llamaba a /api/button/Confirm con el token del comercio
+    (y antes lo guardaba en la memoria del proceso). API Links no lo usa: ya no confirma nada."""
     fuente = open("sri_proxy.py", encoding="utf-8", errors="ignore").read()
-    assert "token = PAYPHONE_TOKEN or _token_store.get" in fuente
+    assert "_token_store" not in fuente
+    inicio = fuente.index("def payphone_webhook():")
+    fin = fuente.index("def ", inicio + 10)
+    assert "button/Confirm\"" not in fuente[inicio:fin] and "requests.post" not in fuente[inicio:fin]
 
 
 # --- endpoints internos: protegidos SIEMPRE, no segun el interruptor ---------
